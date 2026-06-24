@@ -259,7 +259,7 @@ public class Validator {
       b.Append(",\"is_os_binary\":").Append(IsOS(sigType,signer)?"true":"false"); b.Append(",\"signer\":").Append(CertJson(signer)); b.Append(",\"chain\":").Append(chainJson); b.Append(",\"graveyard\":").Append(GraveyardJson(signer!=null?signer.Thumbprint:psThumb, signer!=null?signer.SerialNumber:null, signer!=null?TbsAlg(signer,"SHA256"):null, sha)); b.Append(",\"timestamped\":").Append(tsa!=null?"true":"false"); b.Append(",\"sign_time\":").Append(signTime.HasValue?J(signTime.Value.ToString("o")):"null"); b.Append(",\"sign_time_verified\":").Append((signTime.HasValue&&stVerified)?"true":"false"); b.Append(",\"timestamper\":").Append(CertJson(tsa));
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
       Console.WriteLine(b.ToString());
-      signer?.Dispose(); tsa?.Dispose();
+      if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose();
       }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} Console.WriteLine(ErrJson(sha,"UnknownError",_ex.GetType().Name)); }
     }
   }
