@@ -70,7 +70,10 @@ public class Validator {
   static string Oid(byte[] b){ var s=new StringBuilder(); s.Append(b[0]/40).Append('.').Append(b[0]%40); long v=0; for(int i=1;i<b.Length;i++){v=(v<<7)|(uint)(b[i]&0x7F); if((b[i]&0x80)==0){s.Append('.').Append(v);v=0;}} return s.ToString(); }
   static byte[] ScriptPkcs7(string path){
     try{ if(new FileInfo(path).Length > maxBytes) return null; }catch{ return null; }
-    string[] lines; try{ lines=File.ReadAllLines(path,Encoding.GetEncoding(28591)); }catch{ return null; }
+    // Detect the BOM (UTF-16LE/BE, UTF-8 — normal for signed .ps1) and decode with it;
+    // fall back to ISO-8859-1 for BOM-less ANSI/ASCII (byte-preserving for the SIG markers).
+    string[] lines;
+    try{ var ll=new System.Collections.Generic.List<string>(); using(var sr=new StreamReader(path,Encoding.GetEncoding(28591),true)){ string li; while((li=sr.ReadLine())!=null) ll.Add(li); } lines=ll.ToArray(); }catch{ return null; }
     string pfx=null; var sb=new StringBuilder(); bool inb=false;
     foreach(string raw in lines){ string t=raw.Trim();
       int bi=t.IndexOf("Begin signature block"); if(bi>0){ pfx=t.Substring(0,bi).Trim(); inb=true; continue; }
@@ -220,7 +223,7 @@ public class Validator {
     if(warmDir!=null){ Console.WriteLine(WarmCache(warmDir)); return; }
     if(path!=null && path.StartsWith("\\\\.\\")){ Console.WriteLine(ErrJson(null,"UnknownError","device path rejected")); return; }
     if(path!=null){ try{ if(new FileInfo(path).Length > maxBytes){ Console.WriteLine(ErrJson(null,"UnknownError","file too large")); return; } }catch{} }
-    if(path!=null && path.ToLower().EndsWith(".rdp")){ try{ Console.WriteLine(RdpVal.Validate(path)); }catch(OutOfMemoryException){ throw; }catch(Exception _rex){ try{Console.Error.WriteLine(_rex.ToString());}catch{} Console.WriteLine(ErrJson(null,"UnknownError",_rex.GetType().Name)); } return; }
+    if(path!=null && path.ToLower().EndsWith(".rdp")){ try{ Console.WriteLine(RdpVal.Validate(path, rev)); }catch(OutOfMemoryException){ throw; }catch(Exception _rex){ try{Console.Error.WriteLine(_rex.ToString());}catch{} Console.WriteLine(ErrJson(null,"UnknownError",_rex.GetType().Name)); } return; }
     var sw=new Stopwatch();
     for(int it=0;it<iters;it++){ sw.Restart();
       embeddedCerts=null;
