@@ -1,0 +1,34 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile myatg.exe (in-box .NET Framework csc)
+        shell: cmd
+        run: |
+          set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
+          "%CSC%" /nologo /r:System.Security.dll /out:myatg.exe myatg.cs rdp_validate.cs
+
+      - name: Smoke — validate a real OS binary, expect JSON + exit 0
+        shell: cmd
+        run: |
+          myatg.exe C:\Windows\System32\whoami.exe > out.json
+          if errorlevel 1 ( echo non-zero exit & exit /b 1 )
+          type out.json
+          findstr /C:"\"file_sha256\"" out.json >NUL || ( echo no JSON emitted & exit /b 1 )
+
+      - name: Upload myatg.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: myatg
+          path: |
+            myatg.exe
+            myatg.exe.config
