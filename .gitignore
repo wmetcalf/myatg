@@ -1,0 +1,13 @@
+# build output
+*.exe
+*.pdb
+*.dll
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# myatg runtime side-effects
+*.jsonl
+myatg-build.log

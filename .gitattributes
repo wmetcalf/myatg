@@ -1,0 +1,6 @@
+# Normalise to LF in the repo; csc compiles LF fine. PowerShell stays CRLF-safe.
+* text=auto eol=lf
+*.cs    text eol=lf
+*.config text eol=lf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
