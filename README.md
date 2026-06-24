@@ -138,32 +138,14 @@ cert (e.g. a trailing `%20` in some Microsoft CDP URLs).
 
 ## Examples (real MalwareBazaar samples)
 
-One verdict per supported format, all live on MalwareBazaar — the corpus is full of
-abused / leaked / revoked code-signing certs:
+Real (abridged) `myatg.exe` output on a sample from each supported format — every one a live
+MalwareBazaar sample. Family labels are MalwareBazaar's tags unless noted.
 
-| Format | Sample (MalwareBazaar) | Signer (`subject_cn`) | myatg `status` | Family |
-|--------|------------------------|-----------------------|----------------|--------|
-| EXE | [USDC_Case_47293-A3_Notice.exe](https://bazaar.abuse.ch/sample/0e67b9f5990e3237579b9d11ebd166ee211f6245560b5d2e373f1215031038a3/) | SimpleHelp Ltd | `Revoked` | SimpleHelp |
-| DLL | [Green.dll](https://bazaar.abuse.ch/sample/03012e22602837132c4611cac749de39fb1057a8dead227594d4d4f6fb961552/) | NEW VISION MARKETING LLC | `Revoked` | OysterLoader¹ |
-| MSI | [Quadrantmediaed.msi](https://bazaar.abuse.ch/sample/5da041b3f3efceaf8e49aee25177f1a9a1e2c1b869cf0d91de57fed8a8497c6a/) | ConnectWise, LLC | `Revoked` | ConnectWise |
-| CAB | [main1.cab](https://bazaar.abuse.ch/sample/b4109feeaa85d8f4d67da8db0dc17054ffe28d285b7de6df46fb30e2d053a539/) | "Photo and Fax viewer" (spoofed) | `UntrustedRoot` | ULTRAVNC |
-| Script (`.js`) | [out_bdrts.js](https://bazaar.abuse.ch/sample/fad25892e5179a346cdbdbba1e40f53bd6366806d32b57fa4d7946ebe9ae8621/) | TAIM LLC | `Valid`² | GuLoader |
-| RDP | [ukrtelecom.eu.rdp](https://bazaar.abuse.ch/sample/1916af4debbeaa0ee688c95d2d9d25196bd5765bad5c7a9c1ed7e934e6ffb9ba/) | ukrtelecom.eu | `Expired` | APT29 lure |
+### DLL — [`Green.dll`](https://bazaar.abuse.ch/sample/03012e22602837132c4611cac749de39fb1057a8dead227594d4d4f6fb961552/) · revoked (OysterLoader)
 
-¹ from [certgraveyard.org](https://certgraveyard.org/) (`--gv`); MalwareBazaar tags it only
-`signed`. Family labels otherwise are MalwareBazaar's tags. ² The signature is genuinely
-valid (a real, trusted cert) — but the content is GuLoader: **a valid signature is not a
-safety verdict.** myatg reports the signature truthfully; the maliciousness comes from the
-family / graveyard context.
-
-### Worked example — a revoked-cert DLL
-
-[`Green.dll`](https://bazaar.abuse.ch/sample/03012e22602837132c4611cac749de39fb1057a8dead227594d4d4f6fb961552/)
-(MalwareBazaar, SHA-256 `03012e22…b961552`) is signed with a short-lived
-"NEW VISION MARKETING LLC" certificate issued through Microsoft's ID-Verified code-signing
-program, then **revoked** days later — a cert-abuse pattern seen in the OysterLoader campaign.
-`signtool` / `Get-AuthenticodeSignature.Status` report it `Valid` (they don't check
-revocation); myatg reports (abridged):
+Signed with a short-lived "NEW VISION MARKETING LLC" cert issued through Microsoft's
+ID-Verified code-signing program, then **revoked** days later. `signtool` /
+`Get-AuthenticodeSignature.Status` report it `Valid` (they don't check revocation); myatg:
 
 ```json
 {
@@ -187,11 +169,105 @@ revocation); myatg reports (abridged):
 }
 ```
 
-The `graveyard.malware` attribution comes from the [certgraveyard.org](https://certgraveyard.org/)
-CSV (via `--gv`); MalwareBazaar itself only tags the sample `signed`. A trusted/valid
-counterpart for contrast:
-[`icudt68.dll`](https://bazaar.abuse.ch/sample/ce1ba6d19bd4842fb54daf9d929208b3840ec98e3a135bd89008dd9312f03894/)
-→ `status: Valid`, `revoked: false`.
+(`graveyard.malware` comes from [certgraveyard.org](https://certgraveyard.org/) via `--gv`;
+MalwareBazaar tags the sample only `signed`.)
+
+### EXE — [`USDC_Case_47293-A3_Notice.exe`](https://bazaar.abuse.ch/sample/0e67b9f5990e3237579b9d11ebd166ee211f6245560b5d2e373f1215031038a3/) · revoked (SimpleHelp)
+
+```json
+{
+  "status": "Revoked",
+  "signature_type": "Embedded",
+  "signer": {
+    "subject_cn": "SimpleHelp Ltd",
+    "issuer_cn": "thawte SHA256 Code Signing CA",
+    "not_after": "2021-03-16T23:59:59Z",
+    "eku_codesigning": true
+  },
+  "chain": { "chains_to_trusted_root": true, "revoked": true, "revocation_checked": "online", "valid_at_sign_time": false }
+}
+```
+
+### MSI — [`Quadrantmediaed.msi`](https://bazaar.abuse.ch/sample/5da041b3f3efceaf8e49aee25177f1a9a1e2c1b869cf0d91de57fed8a8497c6a/) · revoked (ConnectWise)
+
+```json
+{
+  "status": "Revoked",
+  "signature_type": "Embedded",
+  "signer": {
+    "subject_cn": "ConnectWise, LLC",
+    "issuer_cn": "DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1",
+    "eku_codesigning": true
+  },
+  "chain": { "chains_to_trusted_root": true, "revoked": true, "revocation_checked": "online" }
+}
+```
+
+### CAB — [`main1.cab`](https://bazaar.abuse.ch/sample/b4109feeaa85d8f4d67da8db0dc17054ffe28d285b7de6df46fb30e2d053a539/) · untrusted self-signed (ULTRAVNC)
+
+The signer's subject *is* its issuer — a self-signed cert with a deceptive name; the chain
+never reaches a trusted root.
+
+```json
+{
+  "status": "UntrustedRoot",
+  "signature_type": "Embedded",
+  "signer": {
+    "subject_cn": "Photo and Fax viewer",
+    "issuer_cn": "Photo and Fax viewer",
+    "eku_codesigning": true
+  },
+  "chain": { "chains_to_trusted_root": false, "revoked": false }
+}
+```
+
+### Script (`.js`) — [`out_bdrts.js`](https://bazaar.abuse.ch/sample/fad25892e5179a346cdbdbba1e40f53bd6366806d32b57fa4d7946ebe9ae8621/) · valid signature, malicious file (GuLoader)
+
+The signature is genuinely valid — a real GlobalSign **EV** code-signing cert — yet the file
+is GuLoader. **A valid signature is not a safety verdict.** For scripts myatg takes `status`
+from `Get-AuthenticodeSignature` (OS truth) and adds the signer/timestamp metadata.
+
+```json
+{
+  "status": "Valid",
+  "signature_type": "Script",
+  "content_verified": true,
+  "signer": {
+    "subject_cn": "TAIM LLC",
+    "issuer_cn": "GlobalSign GCC R45 EV CodeSigning CA 2020",
+    "eku_codesigning": true
+  },
+  "timestamped": true,
+  "sign_time": "2024-04-04T14:42:51Z"
+}
+```
+
+### RDP — [`ukrtelecom.eu.rdp`](https://bazaar.abuse.ch/sample/1916af4debbeaa0ee688c95d2d9d25196bd5765bad5c7a9c1ed7e934e6ffb9ba/) · expired, TLS-cert misuse (APT29 lure)
+
+A typosquatted domain, signed with a Let's Encrypt **TLS** cert — note the EKU
+(`serverAuth`/`clientAuth`, *not* code-signing) — that has since expired. myatg crypto-verifies
+the `rdpsign` content, validates the chain, and reports **signscope coverage** (26 of 51
+settings signed here); `unsigned_dangerous` lists any present-but-unsigned high-risk settings
+(`drivestoredirect`, `alternate shell`, `gatewayhostname`, …).
+
+```json
+{
+  "status": "Expired",
+  "signature_type": "RDP",
+  "signer": {
+    "subject_cn": "ukrtelecom.eu",
+    "issuer_cn": "R10",
+    "eku": ["1.3.6.1.5.5.7.3.1", "1.3.6.1.5.5.7.3.2"],
+    "eku_codesigning": false,
+    "not_after": "2025-04-22T06:49:46Z"
+  },
+  "chain": { "signature_valid": true, "chains_to_trusted_root": true, "expired_now": true, "valid_at_sign_time": false },
+  "signscope_count": 26,
+  "total_settings": 51,
+  "unsigned_settings": 25,
+  "unsigned_dangerous": []
+}
+```
 
 ## Cert graveyard
 
