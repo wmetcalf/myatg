@@ -8,6 +8,48 @@ files on a worker.
 The signature verdict uses `WinVerifyTrust` with `WTD_REVOKE_NONE`, so it is air-gappable
 (signtool-parity); revocation is a separate, opt-in layer. x86_64, .NET Framework 4.x.
 
+## How it differs from `signtool` / `Get-AuthenticodeSignature`
+
+`myatg` is built for *triaging untrusted files*, not for a build pipeline. The practical
+differences from the two standard tools:
+
+- **It folds revocation into the verdict.** `signtool verify` and
+  `Get-AuthenticodeSignature` report `Status = Valid` for a file signed with a cert that
+  chained to a trusted root but was *later revoked* — neither checks revocation by default.
+  `myatg` runs an explicit online `X509Chain` and reports `Revoked`. Across a 1,558-file
+  signed-malware corpus this caught **45** files (abused/leaked code-signing certs) that
+  `Get-AuthenticodeSignature` called `Valid`. **This is the headline value-add.**
+- **Air-gappable signature verdict, separate revocation layer.** The signature check uses
+  `WTD_REVOKE_NONE` (signtool-parity, zero network), so *"is the signature cryptographically
+  intact?"* needs no egress; revocation is a distinct opt-in layer (`--rev
+  online|offline|none`). The two questions are reported separately instead of conflated.
+- **CRL/OCSP cache warming (`--warm-cache <dir>`).** Pre-walks a representative sample's
+  chains with online revocation to populate the on-disk `CryptnetUrlCache`. Snapshot a warm
+  worker afterward and every restored clone inherits a hot cache → revocation serves from
+  cache (~tens of ms, no callout) for covered CAs and only live-fetches genuine misses
+  through your controlled egress. There is no equivalent in `signtool`/`Get-AuthenticodeSignature`.
+- **Microsoft's disallowed kill-list, surfaced.** A cert on the Microsoft Disallowed CTL
+  (DigiNotar-class) is reported as `Distrusted` with `explicit_distrust:true`, not lumped
+  into a generic failure. `--refresh` updates that kill-list (`syncWithWU` + installs the
+  disallowed store) as part of the tool's own update path.
+- **One structured JSON record per file**, not objects/text — a superset of CAPE's
+  `digital_signers`: adds `tbs_sha1`/`tbs_sha256`, per-cert EKU, the full leaf→root chain,
+  and ASN.1-parsed CDP/AIA URLs that the in-VM `signtool` (`aux_sha1` only) lacks.
+- **Cert-graveyard matching (`--gv`).** Matches the signer against a CSV of known-abused
+  certs on `tbs_sha256` / thumbprint / serial / file-SHA256. Neither standard tool does this.
+- **More than PE/MSI.** RDP (`.rdp`) gets a full `rdpsign` crypto-verify **plus signscope
+  coverage** — which dangerous settings are present-but-unsigned (the APT29 lure vector).
+  `signtool`/`Get-AuthenticodeSignature` don't validate RDP at all.
+- **Deterministic on malformed signatures.** `Get-AuthenticodeSignature` can return a
+  different `Status` across runs on malformed-sig malware; the `WinVerifyTrust` verdict is
+  stable.
+- **No dependencies.** A single native `.exe` (in-box .NET Framework, no SDK; the binary
+  path needs no PowerShell) vs. a PowerShell cmdlet.
+
+For **scripts** (`.vbs`/`.js`/`.ps1`) `myatg` intentionally takes its *status* from
+`Get-AuthenticodeSignature` (the OS is the authority there) and wraps it with the structured
+signer/chain/graveyard metadata — a superset on that path, not a replacement.
+
 ## Build
 
 No SDK or external dependencies — `myatg` compiles with the in-box C# compiler that ships
