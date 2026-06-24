@@ -8,10 +8,10 @@ files on a worker.
 The signature verdict uses `WinVerifyTrust` with `WTD_REVOKE_NONE`, so it is air-gappable
 (signtool-parity); revocation is a separate, opt-in layer. x86_64, .NET Framework 4.x.
 
-> 🪦 The name and the "graveyard" theme are a tongue-in-cheek hat tip to
-> **[certgraveyard.org](https://certgraveyard.org/)** — the public registry of abused /
-> leaked code-signing certs that `myatg` can match a signer against (`--gv`).
-> Theme song: [Cleffy — *Meet You At The Graveyard*](https://www.youtube.com/watch?v=dSf_qqI0PjI).
+> 🪦 **myatg** = "**M**eet **Y**ou **A**t **T**he **G**raveyard" (the
+> [Cleffy track](https://www.youtube.com/watch?v=dSf_qqI0PjI)) — a tongue-in-cheek hat tip to
+> **[certgraveyard.org](https://certgraveyard.org/)**, the public registry of abused / leaked
+> code-signing certs that `myatg` can match a signer against (`--gv`).
 
 ## How it differs from `signtool` / `Get-AuthenticodeSignature`
 
