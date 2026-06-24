@@ -42,20 +42,26 @@ public class Validator {
   static int WVT(ref WTD wd,out X509Certificate2 signer,out X509Certificate2 tsa,out DateTime? signTime){ signer=null;tsa=null;signTime=null; int res=WinVerifyTrust(IntPtr.Zero,GVV2,ref wd); if(wd.st!=IntPtr.Zero){ IntPtr pv=WTHelperProvDataFromStateData(wd.st); if(pv!=IntPtr.Zero){ signer=CertFromSgnr(WTHelperGetProvSignerFromChain(pv,0,false,0)); IntPtr cs=WTHelperGetProvSignerFromChain(pv,0,true,0); if(cs!=IntPtr.Zero){ tsa=CertFromSgnr(cs); long ft=Marshal.ReadInt64(cs,4); if(ft>0){ try{signTime=DateTime.FromFileTimeUtc(ft);}catch{} } } } } wd.sa=WTD_SAC; WinVerifyTrust(IntPtr.Zero,GVV2,ref wd); return res; }
   static int VerifyBinary(string path,out X509Certificate2 signer,out string st,out X509Certificate2 tsa,out DateTime? signTime){ tsa=null; signTime=null;
     signer=null; st="None";
-    var fi=new WFI(); fi.cb=(uint)Marshal.SizeOf(typeof(WFI)); fi.path=path; IntPtr pf=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WFI))); Marshal.StructureToPtr(fi,pf,false);
-    var wd=new WTD(); wd.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd.ui=WTD_UI_NONE; wd.rev=WTD_REVOKE_NONE; wd.uc=WTD_CHOICE_FILE; wd.pUnion=pf; wd.sa=WTD_SAV;
-    int res=WVT(ref wd,out signer,out tsa,out signTime); Marshal.FreeHGlobal(pf);
+    var fi=new WFI(); fi.cb=(uint)Marshal.SizeOf(typeof(WFI)); fi.path=path; IntPtr pf=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WFI)));
+    int res;
+    try{ Marshal.StructureToPtr(fi,pf,false);
+      var wd=new WTD(); wd.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd.ui=WTD_UI_NONE; wd.rev=WTD_REVOKE_NONE; wd.uc=WTD_CHOICE_FILE; wd.pUnion=pf; wd.sa=WTD_SAV;
+      res=WVT(ref wd,out signer,out tsa,out signTime);
+    } finally{ Marshal.FreeHGlobal(pf); }
     if((uint)res!=0x800B0100){ if(res==0||signer!=null) st="Embedded"; return res; }
     IntPtr hFile=CreateFile(path,GR,FSR,IntPtr.Zero,OE,0,IntPtr.Zero); if(hFile==IntPtr.Zero||hFile==new IntPtr(-1)) return res;
     try{ uint cb=0; CryptCATAdminCalcHashFromFileHandle(hFile,ref cb,null,0); if(cb==0)return res; byte[] hash=new byte[cb]; if(!CryptCATAdminCalcHashFromFileHandle(hFile,ref cb,hash,0))return res;
       string tag=BitConverter.ToString(hash).Replace("-",""); IntPtr hCA=IntPtr.Zero; if(!CryptCATAdminAcquireContext(ref hCA,IntPtr.Zero,0))return res;
       try{ IntPtr prev=IntPtr.Zero; IntPtr hCat=CryptCATAdminEnumCatalogFromHash(hCA,hash,cb,0,ref prev); if(hCat==IntPtr.Zero)return res;
         var ci=new CATINFO(); ci.cb=(uint)Marshal.SizeOf(typeof(CATINFO)); if(!CryptCATCatalogInfoFromContext(hCat,ref ci,0)){CryptCATAdminReleaseCatalogContext(hCA,hCat,0);return res;}
-        IntPtr pH=Marshal.AllocHGlobal(hash.Length); Marshal.Copy(hash,0,pH,hash.Length);
-        var c2=new WCI(); c2.cb=(uint)Marshal.SizeOf(typeof(WCI)); c2.cat=ci.file; c2.tag=tag; c2.mfile=path; c2.hMember=hFile; c2.pHash=pH; c2.cbHash=cb; c2.hCat=hCA;
-        IntPtr pc2=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WCI))); Marshal.StructureToPtr(c2,pc2,false);
-        var wd2=new WTD(); wd2.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd2.ui=WTD_UI_NONE; wd2.rev=WTD_REVOKE_NONE; wd2.uc=WTD_CHOICE_CATALOG; wd2.pUnion=pc2; wd2.sa=WTD_SAV;
-        int cres=WVT(ref wd2,out signer,out tsa,out signTime); Marshal.FreeHGlobal(pc2); Marshal.FreeHGlobal(pH); CryptCATAdminReleaseCatalogContext(hCA,hCat,0); if(cres==0||signer!=null) st="Catalog"; return cres;
+        IntPtr pH=IntPtr.Zero, pc2=IntPtr.Zero;
+        try{
+          pH=Marshal.AllocHGlobal(hash.Length); Marshal.Copy(hash,0,pH,hash.Length);
+          var c2=new WCI(); c2.cb=(uint)Marshal.SizeOf(typeof(WCI)); c2.cat=ci.file; c2.tag=tag; c2.mfile=path; c2.hMember=hFile; c2.pHash=pH; c2.cbHash=cb; c2.hCat=hCA;
+          pc2=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WCI))); Marshal.StructureToPtr(c2,pc2,false);
+          var wd2=new WTD(); wd2.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd2.ui=WTD_UI_NONE; wd2.rev=WTD_REVOKE_NONE; wd2.uc=WTD_CHOICE_CATALOG; wd2.pUnion=pc2; wd2.sa=WTD_SAV;
+          int cres=WVT(ref wd2,out signer,out tsa,out signTime); if(cres==0||signer!=null) st="Catalog"; return cres;
+        } finally{ if(pc2!=IntPtr.Zero) Marshal.FreeHGlobal(pc2); if(pH!=IntPtr.Zero) Marshal.FreeHGlobal(pH); CryptCATAdminReleaseCatalogContext(hCA,hCat,0); }
       } finally{ CryptCATAdminReleaseContext(hCA,0); }
     } finally{ CloseHandle(hFile); }
   }
@@ -140,8 +146,8 @@ public class Validator {
 
 
   static string[] PsStatus(string path){ try{
-    var psi=new System.Diagnostics.ProcessStartInfo("powershell.exe","-NoProfile -ExecutionPolicy Bypass -Command \"$s=Get-AuthenticodeSignature -LiteralPath '"+path.Replace("'","''")+"'; $c=$s.SignerCertificate; [Console]::Out.Write($s.Status.ToString()+'|'+$(if($c){$c.Thumbprint}else{''}))\"");
-    psi.UseShellExecute=false; psi.RedirectStandardOutput=true; psi.CreateNoWindow=true;
+    var psi=new System.Diagnostics.ProcessStartInfo("powershell.exe","-NoProfile -ExecutionPolicy Bypass -Command \"$s=Get-AuthenticodeSignature -LiteralPath $env:VAL_PATH; $c=$s.SignerCertificate; [Console]::Out.Write($s.Status.ToString()+'|'+$(if($c){$c.Thumbprint}else{''}))\"");
+    psi.UseShellExecute=false; psi.RedirectStandardOutput=true; psi.CreateNoWindow=true; psi.EnvironmentVariables["VAL_PATH"]=path;
     using(var p=System.Diagnostics.Process.Start(psi)){ var ot=p.StandardOutput.ReadToEndAsync(); if(!p.WaitForExit(15000)){ try{p.Kill();}catch{} return new[]{"UnknownError",""}; } string o=""; try{ o=ot.Result; }catch{} return o.Split('|'); }
   }catch{ return new[]{"UnknownError",""}; } }
   static string MapPs(string s){ switch(s){ case "Valid":return "Valid"; case "HashMismatch":return "HashMismatch"; case "NotSigned":return "NotSigned"; case "NotTrusted":return "UntrustedRoot"; case "UnknownError":return "UnknownError"; default:return s; } }
@@ -214,7 +220,7 @@ public class Validator {
     if(warmDir!=null){ Console.WriteLine(WarmCache(warmDir)); return; }
     if(path!=null && path.StartsWith("\\\\.\\")){ Console.WriteLine(ErrJson(null,"UnknownError","device path rejected")); return; }
     if(path!=null){ try{ if(new FileInfo(path).Length > maxBytes){ Console.WriteLine(ErrJson(null,"UnknownError","file too large")); return; } }catch{} }
-    if(path!=null && path.ToLower().EndsWith(".rdp")){ Console.WriteLine(RdpVal.Validate(path)); return; }
+    if(path!=null && path.ToLower().EndsWith(".rdp")){ try{ Console.WriteLine(RdpVal.Validate(path)); }catch(OutOfMemoryException){ throw; }catch(Exception _rex){ try{Console.Error.WriteLine(_rex.ToString());}catch{} Console.WriteLine(ErrJson(null,"UnknownError",_rex.GetType().Name)); } return; }
     var sw=new Stopwatch();
     for(int it=0;it<iters;it++){ sw.Restart();
       embeddedCerts=null;
@@ -250,6 +256,7 @@ public class Validator {
       b.Append(",\"is_os_binary\":").Append(IsOS(sigType,signer)?"true":"false"); b.Append(",\"signer\":").Append(CertJson(signer)); b.Append(",\"chain\":").Append(chainJson); b.Append(",\"graveyard\":").Append(GraveyardJson(signer!=null?signer.Thumbprint:psThumb, signer!=null?signer.SerialNumber:null, signer!=null?TbsAlg(signer,"SHA256"):null, sha)); b.Append(",\"timestamped\":").Append(tsa!=null?"true":"false"); b.Append(",\"sign_time\":").Append(signTime.HasValue?J(signTime.Value.ToString("o")):"null"); b.Append(",\"sign_time_verified\":").Append((signTime.HasValue&&stVerified)?"true":"false"); b.Append(",\"timestamper\":").Append(CertJson(tsa));
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
       Console.WriteLine(b.ToString());
+      signer?.Dispose(); tsa?.Dispose();
       }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} Console.WriteLine(ErrJson(sha,"UnknownError",_ex.GetType().Name)); }
     }
   }
