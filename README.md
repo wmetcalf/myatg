@@ -136,7 +136,27 @@ crl_urls[], ca_issuer_urls[], ocsp_urls[]`. This is a superset of CAPE's `digita
 are ASN.1-parsed (not regex), and reported verbatim — including any quirks baked into the
 cert (e.g. a trailing `%20` in some Microsoft CDP URLs).
 
-## Example — a revoked-cert sample
+## Examples (real MalwareBazaar samples)
+
+One verdict per supported format, all live on MalwareBazaar — the corpus is full of
+abused / leaked / revoked code-signing certs:
+
+| Format | Sample (MalwareBazaar) | Signer (`subject_cn`) | myatg `status` | Family |
+|--------|------------------------|-----------------------|----------------|--------|
+| EXE | [USDC_Case_47293-A3_Notice.exe](https://bazaar.abuse.ch/sample/0e67b9f5990e3237579b9d11ebd166ee211f6245560b5d2e373f1215031038a3/) | SimpleHelp Ltd | `Revoked` | SimpleHelp |
+| DLL | [Green.dll](https://bazaar.abuse.ch/sample/03012e22602837132c4611cac749de39fb1057a8dead227594d4d4f6fb961552/) | NEW VISION MARKETING LLC | `Revoked` | OysterLoader¹ |
+| MSI | [Quadrantmediaed.msi](https://bazaar.abuse.ch/sample/5da041b3f3efceaf8e49aee25177f1a9a1e2c1b869cf0d91de57fed8a8497c6a/) | ConnectWise, LLC | `Revoked` | ConnectWise |
+| CAB | [main1.cab](https://bazaar.abuse.ch/sample/b4109feeaa85d8f4d67da8db0dc17054ffe28d285b7de6df46fb30e2d053a539/) | "Photo and Fax viewer" (spoofed) | `UntrustedRoot` | ULTRAVNC |
+| Script (`.js`) | [out_bdrts.js](https://bazaar.abuse.ch/sample/fad25892e5179a346cdbdbba1e40f53bd6366806d32b57fa4d7946ebe9ae8621/) | TAIM LLC | `Valid`² | GuLoader |
+| RDP | [ukrtelecom.eu.rdp](https://bazaar.abuse.ch/sample/1916af4debbeaa0ee688c95d2d9d25196bd5765bad5c7a9c1ed7e934e6ffb9ba/) | ukrtelecom.eu | `Expired` | APT29 lure |
+
+¹ from [certgraveyard.org](https://certgraveyard.org/) (`--gv`); MalwareBazaar tags it only
+`signed`. Family labels otherwise are MalwareBazaar's tags. ² The signature is genuinely
+valid (a real, trusted cert) — but the content is GuLoader: **a valid signature is not a
+safety verdict.** myatg reports the signature truthfully; the maliciousness comes from the
+family / graveyard context.
+
+### Worked example — a revoked-cert DLL
 
 [`Green.dll`](https://bazaar.abuse.ch/sample/03012e22602837132c4611cac749de39fb1057a8dead227594d4d4f6fb961552/)
 (MalwareBazaar, SHA-256 `03012e22…b961552`) is signed with a short-lived
