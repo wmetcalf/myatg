@@ -8,6 +8,11 @@ files on a worker.
 The signature verdict uses `WinVerifyTrust` with `WTD_REVOKE_NONE`, so it is air-gappable
 (signtool-parity); revocation is a separate, opt-in layer. x86_64, .NET Framework 4.x.
 
+> 🪦 The name and the "graveyard" theme are a tongue-in-cheek hat tip to
+> **[certgraveyard.org](https://certgraveyard.org/)** — the public registry of abused /
+> leaked code-signing certs that `myatg` can match a signer against (`--gv`).
+> Theme song: [Cleffy — *Meet You At The Graveyard*](https://www.youtube.com/watch?v=dSf_qqI0PjI).
+
 ## How it differs from `signtool` / `Get-AuthenticodeSignature`
 
 `myatg` is built for *triaging untrusted files*, not for a build pipeline. The practical
@@ -186,7 +191,3 @@ surfaced as `chain.explicit_distrust` / `status: Distrusted`.
 MIT — see [`LICENSE`](LICENSE). No third-party dependencies; `myatg` uses only the .NET
 Framework BCL and Windows platform APIs. RDP signing-format reverse-engineering credit:
 [nfedera/rdpsign](https://github.com/nfedera/rdpsign).
-
----
-
-*Theme song: [Cleffy — Meet You At The Graveyard](https://www.youtube.com/watch?v=dSf_qqI0PjI) 🪦*
