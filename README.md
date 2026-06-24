@@ -136,6 +136,43 @@ crl_urls[], ca_issuer_urls[], ocsp_urls[]`. This is a superset of CAPE's `digita
 are ASN.1-parsed (not regex), and reported verbatim — including any quirks baked into the
 cert (e.g. a trailing `%20` in some Microsoft CDP URLs).
 
+## Example — a revoked-cert sample
+
+[`Green.dll`](https://bazaar.abuse.ch/sample/03012e22602837132c4611cac749de39fb1057a8dead227594d4d4f6fb961552/)
+(MalwareBazaar, SHA-256 `03012e22…b961552`) is signed with a short-lived
+"NEW VISION MARKETING LLC" certificate issued through Microsoft's ID-Verified code-signing
+program, then **revoked** days later — a cert-abuse pattern seen in the OysterLoader campaign.
+`signtool` / `Get-AuthenticodeSignature.Status` report it `Valid` (they don't check
+revocation); myatg reports (abridged):
+
+```json
+{
+  "status": "Revoked",
+  "signature_type": "Embedded",
+  "content_verified": true,
+  "signer": {
+    "subject_cn": "NEW VISION MARKETING LLC",
+    "issuer_cn": "Microsoft ID Verified CS AOC CA 01",
+    "not_before": "2025-06-25T06:35:01Z",
+    "not_after":  "2025-06-28T06:35:01Z",
+    "eku_codesigning": true
+  },
+  "chain": {
+    "chains_to_trusted_root": true,
+    "revoked": true,
+    "revocation_checked": "online",
+    "valid_at_sign_time": false
+  },
+  "graveyard": { "hit": true, "matched_on": "cert_tbs_sha256", "malware": "OysterLoader" }
+}
+```
+
+The `graveyard.malware` attribution comes from the [certgraveyard.org](https://certgraveyard.org/)
+CSV (via `--gv`); MalwareBazaar itself only tags the sample `signed`. A trusted/valid
+counterpart for contrast:
+[`icudt68.dll`](https://bazaar.abuse.ch/sample/ce1ba6d19bd4842fb54daf9d929208b3840ec98e3a135bd89008dd9312f03894/)
+→ `status: Valid`, `revoked: false`.
+
 ## Cert graveyard
 
 External CSV, pointed at via `--gv`. Columns: `Hash, Serial, Thumbprint, TBS SHA256,
