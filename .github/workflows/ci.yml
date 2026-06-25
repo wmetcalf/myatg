@@ -25,6 +25,15 @@ jobs:
           type out.json
           findstr /C:"\"file_sha256\"" out.json >NUL || ( echo no JSON emitted & exit /b 1 )
 
+      - name: Smoke — --serve mode (one path per stdin line -> one JSON line)
+        shell: cmd
+        run: |
+          (echo C:\Windows\System32\whoami.exe& echo C:\Windows\System32\xcopy.exe) | myatg.exe --serve > serve.json
+          if errorlevel 1 ( echo non-zero exit & exit /b 1 )
+          type serve.json
+          for /f %%c in ('findstr /C:"\"file_sha256\"" serve.json ^| find /c /v ""') do set N=%%c
+          if not "%N%"=="2" ( echo expected 2 verdict lines, got %N% & exit /b 1 )
+
       - name: Upload myatg.exe
         uses: actions/upload-artifact@v4
         with:

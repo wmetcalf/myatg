@@ -214,19 +214,36 @@ public class Validator {
     if(IntPtr.Size!=8) Console.Error.WriteLine("warning: validator assumes x86_64 P/Invoke layout; pointer size="+IntPtr.Size);
     try{ var _e=Environment.GetEnvironmentVariable("VALIDATOR_MAX_SIZE_MB"); long _m; if(_e!=null&&long.TryParse(_e,out _m)&&_m>0&&_m<=long.MaxValue/(1024L*1024L)) maxBytes=_m*1024L*1024L; }catch{}
     string path=null, gvCsv=null, rev="online", warmDir=null; int iters=1;
-    for(int i=0;i<a.Length;i++){ if(a[i]=="--gv"&&i+1<a.Length){gvCsv=a[++i];} else if(a[i]=="--rev"&&i+1<a.Length){rev=a[++i];} else if(a[i]=="--iters"&&i+1<a.Length){iters=int.Parse(a[++i]);} else if(a[i]=="--refresh"){} else if(a[i]=="--warm-cache"&&i+1<a.Length){warmDir=a[++i];} else if(a[i]=="--max-size"&&i+1<a.Length){ long _mb; if(long.TryParse(a[++i],out _mb)&&_mb>0&&_mb<=long.MaxValue/(1024L*1024L)) maxBytes=_mb*1024L*1024L; } else if(a[i].StartsWith("--")){ Console.Error.WriteLine("warning: unknown flag "+a[i]); } else path=a[i]; }
+    for(int i=0;i<a.Length;i++){ if(a[i]=="--gv"&&i+1<a.Length){gvCsv=a[++i];} else if(a[i]=="--rev"&&i+1<a.Length){rev=a[++i];} else if(a[i]=="--iters"&&i+1<a.Length){iters=int.Parse(a[++i]);} else if(a[i]=="--refresh"){} else if(a[i]=="--warm-cache"&&i+1<a.Length){warmDir=a[++i];} else if(a[i]=="--max-size"&&i+1<a.Length){ long _mb; if(long.TryParse(a[++i],out _mb)&&_mb>0&&_mb<=long.MaxValue/(1024L*1024L)) maxBytes=_mb*1024L*1024L; } else if(a[i]=="--serve"){} else if(a[i]=="--scripts"&&i+1<a.Length){i++;} else if(a[i].StartsWith("--")){ Console.Error.WriteLine("warning: unknown flag "+a[i]); } else path=a[i]; }
     if(rev!="online"&&rev!="offline"&&rev!="none"){ Console.Error.WriteLine("warning: invalid --rev \""+rev+"\", using online"); rev="online"; }
     string scriptMode="ps"; for(int i=0;i<a.Length;i++){ if(a[i]=="--scripts"&&i+1<a.Length) scriptMode=a[i+1]; }
     bool refresh=false; foreach(var x in a) if(x=="--refresh") refresh=true;
     if(refresh){ string rr=RefreshTrust(); if(path==null){ Console.WriteLine(rr); return; } Console.Error.WriteLine("refresh: "+rr); }
     if(gvCsv!=null) LoadGraveyard(gvCsv);
     if(warmDir!=null){ Console.WriteLine(WarmCache(warmDir)); return; }
-    if(path!=null && path.StartsWith("\\\\.\\")){ Console.WriteLine(ErrJson(null,"UnknownError","device path rejected")); return; }
-    if(path!=null){ try{ if(new FileInfo(path).Length > maxBytes){ Console.WriteLine(ErrJson(null,"UnknownError","file too large")); return; } }catch{} }
-    if(path!=null && path.ToLower().EndsWith(".rdp")){ try{ Console.WriteLine(RdpVal.Validate(path, rev)); }catch(OutOfMemoryException){ throw; }catch(Exception _rex){ try{Console.Error.WriteLine(_rex.ToString());}catch{} Console.WriteLine(ErrJson(null,"UnknownError",_rex.GetType().Name)); } return; }
-    var sw=new Stopwatch();
-    for(int it=0;it<iters;it++){ sw.Restart();
-      embeddedCerts=null;
+    bool serve=false; foreach(var x in a) if(x=="--serve") serve=true;
+    if(serve){
+      // Persistent warm-server: one file path per stdin line -> one JSON line, until EOF/"quit".
+      // Keeps the CLR + trust caches hot across files (no per-request process fork). The host agent
+      // restarts this process if it ever dies, so one malformed-input crash can't wedge the worker.
+      string line;
+      while((line=Console.In.ReadLine())!=null){ line=line.Trim(); if(line.Length==0) continue; if(line=="quit") break;
+        string outp; try{ outp=ValidateFile(line, rev, scriptMode); }catch(OutOfMemoryException){ throw; }catch(Exception _e){ try{Console.Error.WriteLine(_e.ToString());}catch{} outp=ErrJson(null,"UnknownError",_e.GetType().Name); }
+        Console.WriteLine(outp); Console.Out.Flush();
+      }
+      return;
+    }
+    if(path==null) return;
+    for(int it=0;it<iters;it++) Console.WriteLine(ValidateFile(path, rev, scriptMode));
+  }
+
+  // Validate one file, return the JSON verdict string (no console output) — shared by one-shot + --serve.
+  static string ValidateFile(string path, string rev, string scriptMode){
+    if(path!=null && path.StartsWith("\\\\.\\")) return ErrJson(null,"UnknownError","device path rejected");
+    try{ if(new FileInfo(path).Length > maxBytes) return ErrJson(null,"UnknownError","file too large"); }catch{}
+    if(path!=null && path.ToLower().EndsWith(".rdp")){ try{ return RdpVal.Validate(path, rev); }catch(OutOfMemoryException){ throw; }catch(Exception _rex){ try{Console.Error.WriteLine(_rex.ToString());}catch{} return ErrJson(null,"UnknownError",_rex.GetType().Name); } }
+    var sw=Stopwatch.StartNew();
+    embeddedCerts=null;
       string sha=null; try{ sha=Sha(path); }catch{}
       try{
       X509Certificate2 signer=null, tsa=null; DateTime? signTime=null; string sigType="None"; string status; string psThumb=null; string diag=null; bool stVerified=false;
@@ -258,9 +275,8 @@ public class Validator {
       b.Append(",\"status\":").Append(J(status)).Append(",\"signature_type\":").Append(J(sigType)).Append(",\"content_verified\":").Append(contentOk?"true":"false"); if(diag!=null) b.Append(",\"error\":").Append(J(diag));
       b.Append(",\"is_os_binary\":").Append(IsOS(sigType,signer)?"true":"false"); b.Append(",\"signer\":").Append(CertJson(signer)); b.Append(",\"chain\":").Append(chainJson); b.Append(",\"graveyard\":").Append(GraveyardJson(signer!=null?signer.Thumbprint:psThumb, signer!=null?signer.SerialNumber:null, signer!=null?TbsAlg(signer,"SHA256"):null, sha)); b.Append(",\"timestamped\":").Append(tsa!=null?"true":"false"); b.Append(",\"sign_time\":").Append(signTime.HasValue?J(signTime.Value.ToString("o")):"null"); b.Append(",\"sign_time_verified\":").Append((signTime.HasValue&&stVerified)?"true":"false"); b.Append(",\"timestamper\":").Append(CertJson(tsa));
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
-      Console.WriteLine(b.ToString());
       if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose();
-      }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} Console.WriteLine(ErrJson(sha,"UnknownError",_ex.GetType().Name)); }
-    }
+      return b.ToString();
+      }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} return ErrJson(sha,"UnknownError",_ex.GetType().Name); }
   }
 }
