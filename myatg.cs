@@ -239,7 +239,8 @@ public class Validator {
 
   // Validate one file, return the JSON verdict string (no console output) — shared by one-shot + --serve.
   static string ValidateFile(string path, string rev, string scriptMode){
-    if(path!=null && path.StartsWith("\\\\.\\")) return ErrJson(null,"UnknownError","device path rejected");
+    if(string.IsNullOrWhiteSpace(path)) return ErrJson(null,"UnknownError","empty path");
+    if(path.StartsWith("\\\\.\\")) return ErrJson(null,"UnknownError","device path rejected");
     try{ if(new FileInfo(path).Length > maxBytes) return ErrJson(null,"UnknownError","file too large"); }catch{}
     if(path!=null && path.ToLower().EndsWith(".rdp")){ try{ return RdpVal.Validate(path, rev); }catch(OutOfMemoryException){ throw; }catch(Exception _rex){ try{Console.Error.WriteLine(_rex.ToString());}catch{} return ErrJson(null,"UnknownError",_rex.GetType().Name); } }
     var sw=Stopwatch.StartNew();
