@@ -50,20 +50,20 @@ public partial class Validator {
     string binVal = Q(exe)+" --service --bind "+Q(o.Bind)+" --port "+o.Port+" --rev "+Q(o.Rev)+" --scripts "+Q(o.Scripts);
     if(o.Token!=null) binVal += " --token "+Q(o.Token);
     if(o.AllowInsecure) binVal += " --allow-insecure";
-    int rc = RunTool("sc.exe", "create myatg binPath= \""+binVal+"\" start= auto obj= \"NT SERVICE\\myatg\" DisplayName= \"myatg validator\"");
+    int rc = RunTool(Sys("sc.exe"),"create myatg binPath= \""+binVal+"\" start= auto obj= \"NT SERVICE\\myatg\" DisplayName= \"myatg validator\"");
     if(rc!=0) return rc;
-    RunTool("sc.exe", "failure myatg reset= 60 actions= restart/5000/restart/5000/restart/5000");
-    int aclRc = RunTool("netsh", "http add urlacl url="+prefix+" user=\"NT SERVICE\\myatg\"");
+    RunTool(Sys("sc.exe"),"failure myatg reset= 60 actions= restart/5000/restart/5000/restart/5000");
+    int aclRc = RunTool(Sys("netsh.exe"),"http add urlacl url="+prefix+" user=\"NT SERVICE\\myatg\"");
     if(aclRc!=0) Console.Error.WriteLine("warning: urlacl add failed (rc="+aclRc+"); service may fail to bind");
-    return RunTool("sc.exe", "start myatg");
+    return RunTool(Sys("sc.exe"),"start myatg");
   }
 
   internal static int UninstallService(ServeOpts o){
     // best-effort stop, remove the scoped urlacl, then delete the service.
-    RunTool("sc.exe", "stop myatg");
+    RunTool(Sys("sc.exe"),"stop myatg");
     Thread.Sleep(1000);
     string prefix="http://"+o.Bind+":"+o.Port+"/";
-    RunTool("netsh", "http delete urlacl url="+prefix);
-    return RunTool("sc.exe", "delete myatg");
+    RunTool(Sys("netsh.exe"),"http delete urlacl url="+prefix);
+    return RunTool(Sys("sc.exe"),"delete myatg");
   }
 }

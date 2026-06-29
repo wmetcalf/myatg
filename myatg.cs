@@ -183,8 +183,13 @@ public partial class Validator {
     if(r==null) return "{\"hit\":false}"; return "{\"hit\":true,\"matched_on\":"+J(on)+",\"malware\":"+J(r[0])+",\"malware_type\":"+J(r[1])+"}"; }
 
 
+  // Resolve a Windows system helper to its absolute path so process creation never honors an
+  // attacker-planted binary in the CWD/app dir (CWE-426/427) — these run elevated under --refresh
+  // and the service install.
+  static string Sys(string rel){ try{ return System.IO.Path.Combine(Environment.SystemDirectory, rel); }catch{ return rel; } }
+
   static string[] PsStatus(string path){ try{
-    var psi=new System.Diagnostics.ProcessStartInfo("powershell.exe","-NoProfile -ExecutionPolicy Bypass -Command \"$s=Get-AuthenticodeSignature -LiteralPath $env:VAL_PATH; $c=$s.SignerCertificate; [Console]::Out.Write($s.Status.ToString()+'|'+$(if($c){$c.Thumbprint}else{''}))\"");
+    var psi=new System.Diagnostics.ProcessStartInfo(Sys("WindowsPowerShell\\v1.0\\powershell.exe"),"-NoProfile -ExecutionPolicy Bypass -Command \"$s=Get-AuthenticodeSignature -LiteralPath $env:VAL_PATH; $c=$s.SignerCertificate; [Console]::Out.Write($s.Status.ToString()+'|'+$(if($c){$c.Thumbprint}else{''}))\"");
     psi.UseShellExecute=false; psi.RedirectStandardOutput=true; psi.CreateNoWindow=true; psi.EnvironmentVariables["VAL_PATH"]=path;
     using(var p=System.Diagnostics.Process.Start(psi)){ var ot=p.StandardOutput.ReadToEndAsync(); if(!p.WaitForExit(15000)){ try{p.Kill();}catch{} return new[]{"UnknownError",""}; } string o=""; try{ o=ot.Result; }catch{} return o.Split('|'); }
   }catch{ return new[]{"UnknownError",""}; } }
@@ -195,15 +200,15 @@ public partial class Validator {
   static int RunRc(string exe,string args){ try{ var psi=new System.Diagnostics.ProcessStartInfo(exe,args){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true,CreateNoWindow=true}; using(var p=System.Diagnostics.Process.Start(psi)){ p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd(); p.WaitForExit(90000); return p.ExitCode; } }catch{ return -1; } }
   static string RefreshTrust(){
     var b=new StringBuilder("{");
-    string crl=RunCmd("certutil.exe","-urlcache crl delete");
-    string ocsp=RunCmd("certutil.exe","-urlcache ocsp delete");
+    string crl=RunCmd(Sys("certutil.exe"),"-urlcache crl delete");
+    string ocsp=RunCmd(Sys("certutil.exe"),"-urlcache ocsp delete");
     string tmp=System.IO.Path.GetTempPath()+"wuroots";
     try{ System.IO.Directory.CreateDirectory(tmp); }catch{}
-    string roots=RunCmd("certutil.exe","-f -syncWithWU \""+tmp+"\"");
+    string roots=RunCmd(Sys("certutil.exe"),"-f -syncWithWU \""+tmp+"\"");
     _rootThumbs=null;   // WU sync can add roots -> invalidate the trusted-root thumbprint cache
     string disSst=System.IO.Path.Combine(tmp,"disallowedcert.sst");
     bool disInstalled=false; int disCount=0;
-    try{ if(System.IO.File.Exists(disSst)){ disInstalled = RunRc("certutil.exe","-addstore -f Disallowed \""+disSst+"\"")==0; } using(var ds=new X509Store(StoreName.Disallowed,StoreLocation.LocalMachine)){ ds.Open(OpenFlags.ReadOnly); disCount=ds.Certificates.Count; } }catch{}
+    try{ if(System.IO.File.Exists(disSst)){ disInstalled = RunRc(Sys("certutil.exe"),"-addstore -f Disallowed \""+disSst+"\"")==0; } using(var ds=new X509Store(StoreName.Disallowed,StoreLocation.LocalMachine)){ ds.Open(OpenFlags.ReadOnly); disCount=ds.Certificates.Count; } }catch{}
     b.Append("\"crl_cache_cleared\":").Append(crl.ToLower().Contains("deleted")||crl.ToLower().Contains("command completed")?"true":"false");
     b.Append(",\"ocsp_cache_cleared\":").Append(ocsp.ToLower().Contains("deleted")||ocsp.ToLower().Contains("command completed")?"true":"false");
     b.Append(",\"roots_synced\":").Append(roots.ToLower().Contains("command completed")||roots.ToLower().Contains(".crt")?"true":"false");
@@ -261,7 +266,10 @@ public partial class Validator {
     // Serve/service modes are mutually exclusive (last one on the argv wins, captured as svMode
     // in the single parse pass above). --bind/--port/--token/--allow-insecure are parsed there too.
     if(svMode!=null){
-      ServeOpts o=new ServeOpts(); o.Bind=svBind; o.Port=svPort; o.Token=svToken; o.AllowInsecure=svAllowInsecure; o.Rev=rev; o.Scripts=scriptMode;
+      // An empty/whitespace --token must be treated as NO token, not an enabled (trivially-guessable)
+      // secret: otherwise `--token ""` would pass the non-loopback bind guard (Token!=null) yet accept
+      // an empty bearer, exposing /validate unauthenticated.
+      ServeOpts o=new ServeOpts(); o.Bind=svBind; o.Port=svPort; o.Token=(svToken!=null&&svToken.Trim().Length>0)?svToken:null; o.AllowInsecure=svAllowInsecure; o.Rev=rev; o.Scripts=scriptMode;
       if(svMode=="install"){ Environment.Exit(InstallService(o)); }
       if(svMode=="uninstall"){ Environment.Exit(UninstallService(o)); }
       if(svMode=="service"){ RunService(o); return; }
@@ -322,12 +330,12 @@ public partial class Validator {
         stVerified = (sigType=="Script") ? TsaTrusted(tsa, embeddedCerts) : (tsa!=null); try{ ch.ChainPolicy.VerificationTime = (signTime.HasValue && (sigType!="Script" || stVerified)) ? signTime.Value : (tsa!=null ? signer.NotBefore.AddMinutes(1) : DateTime.Now); }catch{}
         bool ok=ch.Build(signer); bool revoked=false,untrusted=false,nottime=false,revunk=false,distrusted=false;
         foreach(var s2 in ch.ChainStatus){ var f=s2.Status; if(f==X509ChainStatusFlags.Revoked)revoked=true; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)untrusted=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)nottime=true; if((f&(X509ChainStatusFlags.RevocationStatusUnknown|X509ChainStatusFlags.OfflineRevocation))!=0)revunk=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)distrusted=true; }
-        if(status=="__chain__"){ status = (!untrusted&&!revoked&&EkuOkForCodeSign(signer))?"Valid":(revoked?"Revoked":"UnknownError"); }
+        if(status=="__chain__"){ status = (!untrusted&&!revoked&&!nottime&&EkuOkForCodeSign(signer))?"Valid":(revoked?"Revoked":(nottime?"Expired":"UnknownError")); }   // native script path must honor NotTimeValid (a timestamped sig still passes: chain is built at signTime)
         else if(sigType=="Script" && status=="Valid" && (untrusted||revoked)){ status = revoked?"Revoked":"UnknownError"; }
         if(revoked && status!="HashMismatch" && status!="NotSigned") status="Revoked";
         if(distrusted && status!="HashMismatch" && status!="NotSigned") status="Distrusted";
         var celems=new System.Collections.Generic.List<string>(); foreach(var el in ch.ChainElements) celems.Add(CertJson(el.Certificate));
-        chainJson="{\"chain_builds\":"+(ok?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(revoked||!revunk?"\"online\"":"\"unknown\"")+",\"valid_at_sign_time\":"+(!untrusted&&!revoked&&!nottime&&!distrusted?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",celems)+"]}"; ch.Dispose();
+        chainJson="{\"chain_builds\":"+(ok?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revunk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"valid_at_sign_time\":"+(!untrusted&&!revoked&&!nottime&&!distrusted?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",celems)+"]}"; ch.Dispose();
       }
       if(status=="__chain__") status="UnknownError";
       if(signer==null && status!="Valid") contentOk=false;
