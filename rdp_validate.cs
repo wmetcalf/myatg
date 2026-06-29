@@ -51,16 +51,23 @@ public class RdpVal {
     sb.Append(",\"chain\":"+chainInfo);
     // signscope coverage: settings present in file but NOT signed
     var signedScope=new HashSet<string>((scopeM.Success?scopeM.Groups[1].Value:"").Split(',').Select(x=>x.Trim().ToLower()));
-    var fileKeys=new List<string>(); var unsignedDanger=new List<string>();
+    // Duplicate keys: signature reconstruction is first-wins, but mstsc.exe parses last-wins, so an
+    // appended duplicate of a *signed* setting can carry a different (unsigned-effective) value that
+    // still passes signature checks. We keep first-wins (it matches the signature) but surface every
+    // duplicated key so a consumer can catch the shadowing — and flag a duplicated DANGEROUS key.
+    var fileKeys=new List<string>(); var unsignedDanger=new List<string>(); var dupKeys=new List<string>();
     foreach(Match m in Regex.Matches(text, @"(?im)^([a-z][a-z0-9 ]*?):[sib]:")){
       string k=m.Groups[1].Value.Trim().ToLower();
       if(k=="signature"||k=="signscope") continue;
-      if(!fileKeys.Contains(k)) fileKeys.Add(k);
+      if(!fileKeys.Contains(k)) fileKeys.Add(k); else if(!dupKeys.Contains(k)) dupKeys.Add(k);
       if(!signedScope.Contains(k) && DANGEROUS.Contains(k) && !unsignedDanger.Contains(k)) unsignedDanger.Add(k);
     }
+    // a duplicated dangerous key is unsigned-effective under last-wins even if its first copy was signed
+    foreach(var dk in dupKeys){ if(DANGEROUS.Contains(dk) && !unsignedDanger.Contains(dk)) unsignedDanger.Add(dk); }
     int unsignedCount=fileKeys.Count(k=>!signedScope.Contains(k));
     sb.Append(",\"signscope_count\":"+signedScope.Count(x=>x.Length>0)+",\"total_settings\":"+fileKeys.Count+",\"unsigned_settings\":"+unsignedCount);
     sb.Append(",\"unsigned_dangerous\":["+string.Join(",",unsignedDanger.Select(J))+"]");
+    sb.Append(",\"duplicate_settings\":["+string.Join(",",dupKeys.Select(J))+"]");
     if(signer!=null) signer.Dispose();   // SignerInfos[0].Certificate is a fresh X509Certificate2 wrapping an unmanaged handle; dispose it (mirrors myatg.cs) to avoid handle leaks in --serve
     return sb.Append("}").ToString();
   }

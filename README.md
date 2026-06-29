@@ -168,6 +168,12 @@ Creates service `myatg` under the virtual account `NT SERVICE\myatg`, reserves t
 URL (`netsh http add urlacl`) scoped to that account, and sets auto-start + restart-on-failure.
 The service itself then runs unelevated. Remove it with:
 
+> **Install location:** because the service runs as `NT SERVICE\myatg`, install `myatg.exe` from a
+> path that virtual account can read+execute — a system directory such as `C:\Program Files\myatg\`.
+> Installing from a per-user folder (`Downloads`, `Desktop`) makes the service fail to start with
+> *Access Denied*, since the virtual account has no rights there.
+
+
 ```sh
 myatg.exe --uninstall-service --port 8137
 ```

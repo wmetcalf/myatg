@@ -57,16 +57,35 @@ public partial class Validator {
     IntPtr hFile=CreateFile(path,GR,FSR,IntPtr.Zero,OE,0,IntPtr.Zero); if(hFile==IntPtr.Zero||hFile==new IntPtr(-1)) return res;
     try{ uint cb=0; CryptCATAdminCalcHashFromFileHandle(hFile,ref cb,null,0); if(cb==0)return res; byte[] hash=new byte[cb]; if(!CryptCATAdminCalcHashFromFileHandle(hFile,ref cb,hash,0))return res;
       string tag=BitConverter.ToString(hash).Replace("-",""); IntPtr hCA=IntPtr.Zero; if(!CryptCATAdminAcquireContext(ref hCA,IntPtr.Zero,0))return res;
-      try{ IntPtr prev=IntPtr.Zero; IntPtr hCat=CryptCATAdminEnumCatalogFromHash(hCA,hash,cb,0,ref prev); if(hCat==IntPtr.Zero)return res;
-        var ci=new CATINFO(); ci.cb=(uint)Marshal.SizeOf(typeof(CATINFO)); if(!CryptCATCatalogInfoFromContext(hCat,ref ci,0)){CryptCATAdminReleaseCatalogContext(hCA,hCat,0);return res;}
-        IntPtr pH=IntPtr.Zero, pc2=IntPtr.Zero;
-        try{
-          pH=Marshal.AllocHGlobal(hash.Length); Marshal.Copy(hash,0,pH,hash.Length);
-          var c2=new WCI(); c2.cb=(uint)Marshal.SizeOf(typeof(WCI)); c2.cat=ci.file; c2.tag=tag; c2.mfile=path; c2.hMember=hFile; c2.pHash=pH; c2.cbHash=cb; c2.hCat=hCA;
-          pc2=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WCI))); Marshal.StructureToPtr(c2,pc2,false);
-          var wd2=new WTD(); wd2.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd2.ui=WTD_UI_NONE; wd2.rev=WTD_REVOKE_NONE; wd2.uc=WTD_CHOICE_CATALOG; wd2.pUnion=pc2; wd2.sa=WTD_SAV;
-          int cres=WVT(ref wd2,out signer,out tsa,out signTime); if(cres==0||signer!=null) st="Catalog"; return cres;
-        } finally{ if(pc2!=IntPtr.Zero){ Marshal.DestroyStructure(pc2,typeof(WCI)); Marshal.FreeHGlobal(pc2); } if(pH!=IntPtr.Zero) Marshal.FreeHGlobal(pH); CryptCATAdminReleaseCatalogContext(hCA,hCat,0); }   // DestroyStructure frees WCI's marshaled strings (cat/tag/mfile)
+      try{
+        IntPtr prev=IntPtr.Zero; IntPtr hCat=CryptCATAdminEnumCatalogFromHash(hCA,hash,cb,0,ref prev);
+        if(hCat==IntPtr.Zero) return res;
+        // A hash can match several catalogs and the first isn't necessarily the trusted one. Try each
+        // until one fully verifies (cres==0); otherwise keep the last catalog's signer as the fallback
+        // so a single untrusted catalog yields the same verdict as before. Advancing via the prev
+        // parameter frees the previous context, so there is no explicit per-iteration release.
+        int catRes=res; bool anyCat=false;
+        X509Certificate2 lastSigner=null, lastTsa=null; DateTime? lastSt=null;
+        while(hCat!=IntPtr.Zero){
+          var ci=new CATINFO(); ci.cb=(uint)Marshal.SizeOf(typeof(CATINFO));
+          if(CryptCATCatalogInfoFromContext(hCat,ref ci,0)){
+            IntPtr pH=IntPtr.Zero, pc2=IntPtr.Zero;
+            try{
+              pH=Marshal.AllocHGlobal(hash.Length); Marshal.Copy(hash,0,pH,hash.Length);
+              var c2=new WCI(); c2.cb=(uint)Marshal.SizeOf(typeof(WCI)); c2.cat=ci.file; c2.tag=tag; c2.mfile=path; c2.hMember=hFile; c2.pHash=pH; c2.cbHash=cb; c2.hCat=hCA;
+              pc2=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WCI))); Marshal.StructureToPtr(c2,pc2,false);
+              var wd2=new WTD(); wd2.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd2.ui=WTD_UI_NONE; wd2.rev=WTD_REVOKE_NONE; wd2.uc=WTD_CHOICE_CATALOG; wd2.pUnion=pc2; wd2.sa=WTD_SAV;
+              X509Certificate2 s2=null, t2=null; DateTime? st2=null;
+              int cres=WVT(ref wd2,out s2,out t2,out st2);
+              if(cres==0){ signer=s2; tsa=t2; signTime=st2; st="Catalog"; if(lastSigner!=null)lastSigner.Dispose(); if(lastTsa!=null)lastTsa.Dispose(); return cres; }
+              if(lastSigner!=null)lastSigner.Dispose(); if(lastTsa!=null)lastTsa.Dispose();
+              lastSigner=s2; lastTsa=t2; lastSt=st2; catRes=cres; anyCat=true;
+            } finally{ if(pc2!=IntPtr.Zero){ Marshal.DestroyStructure(pc2,typeof(WCI)); Marshal.FreeHGlobal(pc2); } if(pH!=IntPtr.Zero) Marshal.FreeHGlobal(pH); }
+          }
+          IntPtr cur=hCat; hCat=CryptCATAdminEnumCatalogFromHash(hCA,hash,cb,0,ref cur);
+        }
+        if(anyCat){ signer=lastSigner; tsa=lastTsa; signTime=lastSt; if(signer!=null) st="Catalog"; }
+        return catRes;
       } finally{ CryptCATAdminReleaseContext(hCA,0); }
     } finally{ CloseHandle(hFile); }
   }
@@ -129,7 +148,17 @@ public partial class Validator {
   // AIA = SEQUENCE OF AccessDescription{ accessMethod OID, accessLocation GeneralName }; split caIssuers (..48.2) vs OCSP (..48.1)
   static void AiaUrls(X509Certificate2 c, System.Collections.Generic.List<string> ca, System.Collections.Generic.List<string> ocsp){ foreach(var ext in c.Extensions){ if(ext.Oid.Value!="1.3.6.1.5.5.7.1.1") continue; try{ byte[] raw=ext.RawData; int hl,ln; if(TLV(raw,0,out hl,out ln)!=0x30) continue; int p=hl,end=hl+ln; while(p+1<end){ int h2,l2; int t2=TLV(raw,p,out h2,out l2); int cs=p+h2; if(l2<0||cs+l2>end) break; if(t2==0x30){ int ip=cs,iend=cs+l2; string method=null,uri=null; while(ip+1<iend){ int h3,l3; int t3=TLV(raw,ip,out h3,out l3); int ccs=ip+h3; if(l3<0||ccs+l3>iend) break; if(t3==0x06) method=Oid(Sub(raw,ccs,l3)); else if(t3==0x86) uri=Encoding.ASCII.GetString(raw,ccs,l3).Trim(); ip=ccs+l3; } if(uri!=null&&uri.Length>0){ if(method=="1.3.6.1.5.5.7.48.2"){ if(!ca.Contains(uri))ca.Add(uri); } else if(method=="1.3.6.1.5.5.7.48.1"){ if(!ocsp.Contains(uri))ocsp.Add(uri); } } } p=cs+l2; } }catch{} } }
   static bool SelfIssued(X509Certificate2 c){ byte[] su=c.SubjectName.RawData, iss=c.IssuerName.RawData; if(su.Length!=iss.Length) return false; for(int k=0;k<su.Length;k++) if(su[k]!=iss[k]) return false; return true; }
-  static bool IsTrustedRoot(X509Certificate2 c){ if(c==null) return false; foreach(var loc in new[]{StoreLocation.LocalMachine,StoreLocation.CurrentUser}){ try{ using(var st=new X509Store(StoreName.Root,loc)){ st.Open(OpenFlags.ReadOnly); if(st.Certificates.Find(X509FindType.FindByThumbprint,c.Thumbprint,false).Count>0) return true; } }catch{} } return false; }
+  // Cache root-store thumbprints: the live lookup loaded the entire root store (~300 certs) for every
+  // cert during JSON serialization. Built lazily, rebuilt on RefreshTrust (which can add WU roots).
+  // Reads run under the ValidateFile lock, so the lazy build is single-threaded.
+  static System.Collections.Generic.HashSet<string> _rootThumbs=null;
+  static System.Collections.Generic.HashSet<string> RootThumbs(){
+    if(_rootThumbs!=null) return _rootThumbs;
+    var s=new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach(var loc in new[]{StoreLocation.LocalMachine,StoreLocation.CurrentUser}){ try{ using(var st=new X509Store(StoreName.Root,loc)){ st.Open(OpenFlags.ReadOnly); foreach(var rc in st.Certificates){ if(rc.Thumbprint!=null) s.Add(rc.Thumbprint); rc.Dispose(); } } }catch{} }
+    _rootThumbs=s; return s;
+  }
+  static bool IsTrustedRoot(X509Certificate2 c){ if(c==null||c.Thumbprint==null) return false; return RootThumbs().Contains(c.Thumbprint); }
   static string UrlArr(System.Collections.Generic.List<string> l){ var b=new StringBuilder("["); for(int i=0;i<l.Count;i++){ if(i>0)b.Append(","); b.Append(J(l[i])); } return b.Append("]").ToString(); }
   static string TbsAlg(X509Certificate2 c, string alg){ byte[] raw=c.RawData; int p=1; int l=raw[p++]; if(l>=0x80){int n=l&0x7F;l=0;for(int i=0;i<n;i++)l=(l<<8)|raw[p++];} int s=p; int q=s+1; int tl=raw[q++]; if(tl>=0x80){int n=tl&0x7F;tl=0;for(int i=0;i<n;i++)tl=(tl<<8)|raw[q++];} int tot=(q-s)+tl; byte[] t=new byte[tot]; Array.Copy(raw,s,t,0,tot); using(var h=HashAlgorithm.Create(alg)) return BitConverter.ToString(h.ComputeHash(t)).Replace("-","").ToLower(); }
   public static string CertJson(X509Certificate2 c){ if(c==null) return "null"; var eku=new System.Collections.Generic.List<string>(); bool cs=false; foreach(var e in c.Extensions){ var k=e as X509EnhancedKeyUsageExtension; if(k!=null){ foreach(var o in k.EnhancedKeyUsages){ eku.Add(o.Value); if(o.Value=="1.3.6.1.5.5.7.3.3") cs=true; } } }
@@ -171,6 +200,7 @@ public partial class Validator {
     string tmp=System.IO.Path.GetTempPath()+"wuroots";
     try{ System.IO.Directory.CreateDirectory(tmp); }catch{}
     string roots=RunCmd("certutil.exe","-f -syncWithWU \""+tmp+"\"");
+    _rootThumbs=null;   // WU sync can add roots -> invalidate the trusted-root thumbprint cache
     string disSst=System.IO.Path.Combine(tmp,"disallowedcert.sst");
     bool disInstalled=false; int disCount=0;
     try{ if(System.IO.File.Exists(disSst)){ disInstalled = RunRc("certutil.exe","-addstore -f Disallowed \""+disSst+"\"")==0; } using(var ds=new X509Store(StoreName.Disallowed,StoreLocation.LocalMachine)){ ds.Open(OpenFlags.ReadOnly); disCount=ds.Certificates.Count; } }catch{}
