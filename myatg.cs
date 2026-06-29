@@ -214,26 +214,21 @@ public partial class Validator {
     if(IntPtr.Size!=8) Console.Error.WriteLine("warning: validator assumes x86_64 P/Invoke layout; pointer size="+IntPtr.Size);
     try{ var _e=Environment.GetEnvironmentVariable("VALIDATOR_MAX_SIZE_MB"); long _m; if(_e!=null&&long.TryParse(_e,out _m)&&_m>0&&_m<=long.MaxValue/(1024L*1024L)) maxBytes=_m*1024L*1024L; }catch{}
     string path=null, gvCsv=null, rev="online", warmDir=null; int iters=1;
-    for(int i=0;i<a.Length;i++){ if(a[i]=="--gv"&&i+1<a.Length){gvCsv=a[++i];} else if(a[i]=="--rev"&&i+1<a.Length){rev=a[++i];} else if(a[i]=="--iters"&&i+1<a.Length){iters=int.Parse(a[++i]);} else if(a[i]=="--refresh"){} else if(a[i]=="--warm-cache"&&i+1<a.Length){warmDir=a[++i];} else if(a[i]=="--max-size"&&i+1<a.Length){ long _mb; if(long.TryParse(a[++i],out _mb)&&_mb>0&&_mb<=long.MaxValue/(1024L*1024L)) maxBytes=_mb*1024L*1024L; } else if(a[i]=="--serve"){} else if(a[i]=="--scripts"&&i+1<a.Length){i++;} else if(a[i]=="--serve-http"){} else if(a[i]=="--service"){} else if(a[i]=="--install-service"){} else if(a[i]=="--uninstall-service"){} else if(a[i]=="--bind"&&i+1<a.Length){i++;} else if(a[i]=="--port"&&i+1<a.Length){i++;} else if(a[i]=="--token"&&i+1<a.Length){i++;} else if(a[i]=="--allow-insecure"){} else if(a[i].StartsWith("--")){ Console.Error.WriteLine("warning: unknown flag "+a[i]); } else path=a[i]; }
+    string svMode=null, svBind="127.0.0.1", svToken=null; int svPort=8137; bool svAllowInsecure=false;
+    for(int i=0;i<a.Length;i++){ if(a[i]=="--gv"&&i+1<a.Length){gvCsv=a[++i];} else if(a[i]=="--rev"&&i+1<a.Length){rev=a[++i];} else if(a[i]=="--iters"&&i+1<a.Length){iters=int.Parse(a[++i]);} else if(a[i]=="--refresh"){} else if(a[i]=="--warm-cache"&&i+1<a.Length){warmDir=a[++i];} else if(a[i]=="--max-size"&&i+1<a.Length){ long _mb; if(long.TryParse(a[++i],out _mb)&&_mb>0&&_mb<=long.MaxValue/(1024L*1024L)) maxBytes=_mb*1024L*1024L; } else if(a[i]=="--serve"){} else if(a[i]=="--scripts"&&i+1<a.Length){i++;} else if(a[i]=="--serve-http"){svMode="serve-http";} else if(a[i]=="--service"){svMode="service";} else if(a[i]=="--install-service"){svMode="install";} else if(a[i]=="--uninstall-service"){svMode="uninstall";} else if(a[i]=="--bind"&&i+1<a.Length){svBind=a[++i];} else if(a[i]=="--port"&&i+1<a.Length){ int _pp; if(int.TryParse(a[i+1],out _pp)&&_pp>0&&_pp<=65535) svPort=_pp; else Console.Error.WriteLine("warning: invalid --port \""+a[i+1]+"\", using "+svPort); i++; } else if(a[i]=="--token"&&i+1<a.Length){svToken=a[++i];} else if(a[i]=="--allow-insecure"){svAllowInsecure=true;} else if(a[i].StartsWith("--")){ Console.Error.WriteLine("warning: unknown flag "+a[i]); } else path=a[i]; }
     if(rev!="online"&&rev!="offline"&&rev!="none"){ Console.Error.WriteLine("warning: invalid --rev \""+rev+"\", using online"); rev="online"; }
     string scriptMode="ps"; for(int i=0;i<a.Length;i++){ if(a[i]=="--scripts"&&i+1<a.Length) scriptMode=a[i+1]; }
     bool refresh=false; foreach(var x in a) if(x=="--refresh") refresh=true;
     if(refresh){ string rr=RefreshTrust(); if(path==null){ Console.WriteLine(rr); return; } Console.Error.WriteLine("refresh: "+rr); }
     if(gvCsv!=null) LoadGraveyard(gvCsv);
     if(warmDir!=null){ Console.WriteLine(WarmCache(warmDir)); return; }
-    bool serveHttp=false, svc=false, installSvc=false, uninstallSvc=false;
-    foreach(var x in a){ if(x=="--serve-http")serveHttp=true; else if(x=="--service")svc=true; else if(x=="--install-service")installSvc=true; else if(x=="--uninstall-service")uninstallSvc=true; }
-    if(serveHttp||svc||installSvc||uninstallSvc){
-      ServeOpts o=new ServeOpts(); o.Rev=rev; o.Scripts=scriptMode;
-      for(int i=0;i<a.Length;i++){
-        if(a[i]=="--bind"&&i+1<a.Length) o.Bind=a[++i];
-        else if(a[i]=="--port"&&i+1<a.Length) int.TryParse(a[++i], out o.Port);
-        else if(a[i]=="--token"&&i+1<a.Length) o.Token=a[++i];
-        else if(a[i]=="--allow-insecure") o.AllowInsecure=true;
-      }
-      if(installSvc){ Environment.Exit(InstallService(o)); }
-      if(uninstallSvc){ Environment.Exit(UninstallService(o)); }
-      if(svc){ RunService(o); return; }
+    // Serve/service modes are mutually exclusive (last one on the argv wins, captured as svMode
+    // in the single parse pass above). --bind/--port/--token/--allow-insecure are parsed there too.
+    if(svMode!=null){
+      ServeOpts o=new ServeOpts(); o.Bind=svBind; o.Port=svPort; o.Token=svToken; o.AllowInsecure=svAllowInsecure; o.Rev=rev; o.Scripts=scriptMode;
+      if(svMode=="install"){ Environment.Exit(InstallService(o)); }
+      if(svMode=="uninstall"){ Environment.Exit(UninstallService(o)); }
+      if(svMode=="service"){ RunService(o); return; }
       Environment.Exit(ServeHttp(o));
     }
     bool serve=false; foreach(var x in a) if(x=="--serve") serve=true;
@@ -252,8 +247,20 @@ public partial class Validator {
     for(int it=0;it<iters;it++) Console.WriteLine(ValidateFile(path, rev, scriptMode));
   }
 
-  // Validate one file, return the JSON verdict string (no console output) — shared by one-shot + --serve.
+  // Serialize validation: ValidateFileLocked mutates process-global static state (embeddedCerts at
+  // :257/262 + VerifyScript, the graveyard/CDP caches) and drives the WinVerifyTrust / X509Chain
+  // engines, so concurrent callers would race and cross-contaminate verdicts. The HTTP server
+  // (--serve-http) dispatches requests on a threadpool; one-shot and stdin --serve are sequential.
+  // A worker handles one sample at a time, so taking a lock here costs nothing and keeps verdicts
+  // byte-identical across all entry points.
+  static readonly object _valLock = new object();
+
+  // Validate one file, return the JSON verdict string (no console output) — shared by one-shot + --serve + HTTP.
   static string ValidateFile(string path, string rev, string scriptMode){
+    lock(_valLock){ return ValidateFileLocked(path, rev, scriptMode); }
+  }
+
+  static string ValidateFileLocked(string path, string rev, string scriptMode){
     if(string.IsNullOrWhiteSpace(path)) return ErrJson(null,"UnknownError","empty path");
     if(path.StartsWith("\\\\.\\")) return ErrJson(null,"UnknownError","device path rejected");
     try{ if(new FileInfo(path).Length > maxBytes) return ErrJson(null,"UnknownError","file too large"); }catch{}

@@ -118,6 +118,8 @@ jobs:
             if ($noTok -ne 401) { Write-Error "missing token: $noTok"; exit 1 }
             $badTok = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -Headers @{Authorization='Bearer nope'} -TimeoutSec 30 }
             if ($badTok -ne 401) { Write-Error "bad token: $badTok"; exit 1 }
+            $emptyTok = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -Headers @{Authorization='Bearer '} -TimeoutSec 30 }
+            if ($emptyTok -ne 401) { Write-Error "empty bearer: $emptyTok (regression: must 401, not 500)"; exit 1 }
             $ok = (Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -Headers @{Authorization='Bearer s3cret'} -TimeoutSec 30).StatusCode
             if ($ok -ne 200) { Write-Error "good token: $ok"; exit 1 }
             Write-Host 'token auth ok'

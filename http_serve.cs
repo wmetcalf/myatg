@@ -49,21 +49,38 @@ public partial class Validator {
       return 2;
     }
     Console.Error.WriteLine("myatg http serve listening on "+prefix);
+    Prime(o);   // warm CryptoAPI/X509 chain engine + JIT before accepting, so request #1 isn't cold
     Semaphore gate = new Semaphore(o.MaxConcurrency, o.MaxConcurrency);
     while(!httpStop){
       HttpListenerContext ctx;
       try { ctx = httpListener.GetContext(); }
       catch(HttpListenerException){ break; }
       catch(InvalidOperationException){ break; }
-      ThreadPool.QueueUserWorkItem(delegate(object s){
-        gate.WaitOne();
-        try { HandleRequest((HttpListenerContext)s, o); }
-        catch(OutOfMemoryException){ throw; }
-        catch(Exception){ }
-        finally { gate.Release(); }
-      }, ctx);
+      // Acquire the gate IN the accept loop (not inside the work item): this blocks GetContext from
+      // accepting past MaxConcurrency in-flight, so the listener backlog applies backpressure instead
+      // of unbounded contexts/threads piling up under a connection flood.
+      gate.WaitOne();
+      try {
+        ThreadPool.QueueUserWorkItem(delegate(object s){
+          try { HandleRequest((HttpListenerContext)s, o); }
+          catch(OutOfMemoryException){ throw; }
+          catch(Exception){ }
+          finally { gate.Release(); }
+        }, ctx);
+      } catch(Exception){ gate.Release(); }   // queue rejected the item -> release so we don't leak the permit
     }
     return 0;
+  }
+
+  // One-time warmup so the first real request doesn't pay cold CryptoAPI/chain-engine init plus the
+  // first CRL/OCSP fetch inline (the stdin --serve child is primed the same way by the host). The
+  // probe runs the configured rev so an online warmup actually pre-fills the revocation cache.
+  // Best-effort: a prime failure (no probe binary, offline) must never stop the server from serving.
+  static void Prime(ServeOpts o){
+    try {
+      string probe = Path.Combine(Environment.SystemDirectory, "whoami.exe");
+      if(File.Exists(probe)) ValidateFile(probe, o.Rev, o.Scripts);
+    } catch(OutOfMemoryException){ throw; } catch(Exception){}
   }
 
   static void HandleRequest(HttpListenerContext ctx, ServeOpts o){
@@ -79,7 +96,7 @@ public partial class Validator {
       }
       if(path!="/validate"){ WriteJson(res, 404, "{\"error\":\"not found\"}"); return; }
       if(req.HttpMethod!="POST"){ WriteJson(res, 405, "{\"error\":\"method not allowed\"}"); return; }
-      if(req.ContentLength64 > maxBytes){ WriteJson(res, 413, "{\"error\":\"file too large\"}"); return; }
+      if(req.ContentLength64 > maxBytes){ WriteJson(res, 413, ErrJson(null,"UnknownError","file too large")); return; }
       string rev=o.Rev, scripts=o.Scripts;
       var q=req.QueryString;
       if(q["rev"]!=null) rev=q["rev"];
@@ -100,8 +117,8 @@ public partial class Validator {
             fs.Write(buf,0,r);
           }
         }
-        if(tooBig){ WriteJson(res, 413, "{\"error\":\"file too large\"}"); return; }
-        if(total==0){ WriteJson(res, 400, "{\"error\":\"empty body\"}"); return; }
+        if(tooBig){ WriteJson(res, 413, ErrJson(null,"UnknownError","file too large")); return; }
+        if(total==0){ WriteJson(res, 400, ErrJson(null,"UnknownError","empty body")); return; }
         string verdict;
         try { verdict = ValidateFile(tmp, rev, scripts); }
         catch(OutOfMemoryException){ throw; }
@@ -119,6 +136,7 @@ public partial class Validator {
   static bool FixedEquals(string a, string b){
     if(a==null||b==null) return false;
     byte[] x=Encoding.UTF8.GetBytes(a), y=Encoding.UTF8.GetBytes(b);
+    if(y.Length==0) return x.Length==0;   // an empty bearer ('Authorization: Bearer ') must 401, not index y[0] -> crash -> 500
     int diff = x.Length ^ y.Length;
     for(int i=0;i<x.Length;i++) diff |= x[i] ^ y[(i<y.Length)?i:0];
     return diff==0;
