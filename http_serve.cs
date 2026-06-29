@@ -127,9 +127,4 @@ public partial class Validator {
     res.OutputStream.Write(b,0,b.Length);
     res.OutputStream.Close();
   }
-
-  // --- Task 1 temporary stubs (replaced by service.cs in Task 5) ---
-  internal static int InstallService(ServeOpts o){ Console.Error.WriteLine("not implemented"); return 1; }
-  internal static int UninstallService(ServeOpts o){ Console.Error.WriteLine("not implemented"); return 1; }
-  internal static void RunService(ServeOpts o){ ServeHttp(o); }
 }

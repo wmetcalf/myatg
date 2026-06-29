@@ -15,7 +15,7 @@ jobs:
         shell: cmd
         run: |
           set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
-          "%CSC%" /nologo /r:System.Security.dll /out:myatg.exe myatg.cs rdp_validate.cs http_serve.cs
+          "%CSC%" /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:myatg.exe myatg.cs rdp_validate.cs http_serve.cs service.cs
 
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
@@ -128,6 +128,24 @@ jobs:
           $q = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--bind','0.0.0.0','--port','8142' -Wait -PassThru
           if ($q.ExitCode -eq 0) { Write-Error 'expected non-zero exit for insecure bind'; exit 1 }
           Write-Host 'fail-closed ok'
+
+      - name: Smoke — install service, healthz, uninstall
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path .\myatg.exe).Path
+          & $exe --install-service --port 8143
+          if ($LASTEXITCODE -ne 0) { Write-Error "install rc=$LASTEXITCODE"; exit 1 }
+          Start-Sleep -Seconds 3
+          $svc = Get-Service myatg
+          if ($svc.Status -ne 'Running') { Write-Error "service status: $($svc.Status)"; exit 1 }
+          $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8143/healthz' -TimeoutSec 10
+          if (-not $r.ok) { Write-Error 'service healthz not ok'; exit 1 }
+          Write-Host 'service running + healthz ok'
+          & $exe --uninstall-service --port 8143
+          if ($LASTEXITCODE -ne 0) { Write-Error "uninstall rc=$LASTEXITCODE"; exit 1 }
+          Start-Sleep -Seconds 2
+          if (Get-Service myatg -ErrorAction SilentlyContinue) { Write-Error 'service still present'; exit 1 }
+          Write-Host 'uninstall ok'
 
       - name: Upload myatg.exe
         uses: actions/upload-artifact@v4
