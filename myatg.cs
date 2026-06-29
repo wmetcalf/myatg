@@ -89,8 +89,19 @@ public partial class Validator {
       } finally{ CryptCATAdminReleaseContext(hCA,0); }
     } finally{ CloseHandle(hFile); }
   }
-  static int TLV(byte[] b,int o,out int hl,out int ln){ int tag=b[o]; int p=o+1; int l=b[p++]; if(l>=0x80){int n=l&0x7F;l=0;for(int i=0;i<n;i++)l=(l<<8)|b[p++];} hl=p-o; ln=l; return tag; }
-  static byte[] Sub(byte[] b,int o,int l){ var r=new byte[l]; Array.Copy(b,o,r,0,l); return r; }
+  // ASN.1 DER tag/length reader. Bounds-checked: the content (ec=cms.ContentInfo.Content) is opaque
+  // to SignedCms.Decode, so its nested length fields are attacker-controlled. Reject a length-of-length
+  // past the buffer, an absurd length-of-length, a negative (overflowed) length, or a content length
+  // that exceeds the buffer — otherwise Sub would allocate `new byte[length]` from an attacker DER
+  // field (up to ~2GB) and OOM-crash the persistent service before any range check.
+  static int TLV(byte[] b,int o,out int hl,out int ln){ hl=0; ln=0;
+    if(b==null||o<0||o>=b.Length) throw new Exception("der: offset out of range");
+    int tag=b[o]; int p=o+1; if(p>=b.Length) throw new Exception("der: truncated length");
+    int l=b[p++];
+    if(l>=0x80){ int n=l&0x7F; if(n>4) throw new Exception("der: length-of-length too large"); if(p+n>b.Length) throw new Exception("der: truncated length"); l=0; for(int i=0;i<n;i++) l=(l<<8)|b[p++]; }
+    if(l<0||l>b.Length) throw new Exception("der: content length out of range");
+    hl=p-o; ln=l; return tag; }
+  static byte[] Sub(byte[] b,int o,int l){ if(b==null||o<0||l<0||o>b.Length||l>b.Length-o) throw new Exception("der: sub-range out of bounds"); var r=new byte[l]; Array.Copy(b,o,r,0,l); return r; }
   static string Oid(byte[] b){ var s=new StringBuilder(); s.Append(b[0]/40).Append('.').Append(b[0]%40); long v=0; for(int i=1;i<b.Length;i++){v=(v<<7)|(uint)(b[i]&0x7F); if((b[i]&0x80)==0){s.Append('.').Append(v);v=0;}} return s.ToString(); }
   static byte[] ScriptPkcs7(string path){
     try{ if(new FileInfo(path).Length > maxBytes) return null; }catch{ return null; }

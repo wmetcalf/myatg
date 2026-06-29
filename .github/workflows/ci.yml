@@ -149,6 +149,38 @@ jobs:
           if (Get-Service myatg -ErrorAction SilentlyContinue) { Write-Error 'service still present'; exit 1 }
           Write-Host 'uninstall ok'
 
+      - name: Smoke — oversized-TLV script signature does not amplify memory
+        shell: pwsh
+        run: |
+          # Craft a valid SignedCms whose ContentInfo.Content (opaque to SignedCms.Decode) has an inner
+          # TLV declaring a ~2GB length. A regressed DER walker would `new byte[~2GB]` from it; the
+          # bounds-checked one rejects it. Verdict is identical either way (UnknownError), so this test
+          # asserts on the committed memory the bad path leaks.
+          Add-Type -AssemblyName System.Security
+          $rsa=[System.Security.Cryptography.RSA]::Create(2048)
+          $req=New-Object System.Security.Cryptography.X509Certificates.CertificateRequest('CN=evil',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+          $oc=New-Object System.Security.Cryptography.OidCollection; [void]$oc.Add((New-Object System.Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))
+          $req.CertificateExtensions.Add((New-Object System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($oc,$false)))
+          $cert=$req.CreateSelfSigned([DateTimeOffset]::Now.AddDays(-1),[DateTimeOffset]::Now.AddDays(365))
+          $evil=[byte[]]@(0x30,0x14,0x30,0x12,0x06,0x0A,0x2B,0x06,0x01,0x04,0x01,0x82,0x37,0x02,0x01,0x04,0x04,0x84,0x7F,0x00,0x00,0x00)
+          $ci=New-Object System.Security.Cryptography.Pkcs.ContentInfo((New-Object System.Security.Cryptography.Oid('1.3.6.1.4.1.311.2.1.4')),$evil)
+          $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms($ci,$false)
+          $cms.ComputeSignature((New-Object System.Security.Cryptography.Pkcs.CmsSigner($cert)))
+          $b64=[Convert]::ToBase64String($cms.Encode())
+          $txt="Write-Host hi`r`n# SIG # Begin signature block`r`n"
+          for($i=0;$i -lt $b64.Length;$i+=64){ $txt+='# SIG # '+$b64.Substring($i,[Math]::Min(64,$b64.Length-$i))+"`r`n" }
+          $txt+="# SIG # End signature block`r`n"
+          [IO.File]::WriteAllText("$PWD\evil.ps1",$txt)
+          $psi=New-Object Diagnostics.ProcessStartInfo; $psi.FileName="$PWD\myatg.exe"; $psi.Arguments='--scripts native "'+"$PWD\evil.ps1"+'"'; $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true
+          $p=[Diagnostics.Process]::Start($psi); $max=0
+          while(-not $p.HasExited){ try{$p.Refresh(); if($p.PrivateMemorySize64 -gt $max){$max=$p.PrivateMemorySize64}}catch{}; Start-Sleep -Milliseconds 10 }
+          $out=$p.StandardOutput.ReadToEnd(); $mb=[math]::Round($max/1MB)
+          Write-Host ("peak commit MB=$mb status=" + ($out | ConvertFrom-Json).status)
+          if ($p.ExitCode -ne 0) { Write-Error "process crashed (exit $($p.ExitCode))"; exit 1 }
+          if (-not ($out | ConvertFrom-Json).status) { Write-Error 'no verdict JSON'; exit 1 }
+          if ($mb -gt 300) { Write-Error "oversized DER length amplified commit to ${mb} MB - TLV/Sub bounds check regressed"; exit 1 }
+          Write-Host 'tlv-bounds ok'
+
       - name: Upload myatg.exe
         uses: actions/upload-artifact@v4
         with:
