@@ -39,7 +39,12 @@ public partial class Validator {
 
   static DateTime? TstGenTime(byte[] tst){ int hl,ln; TLV(tst,0,out hl,out ln); int p=hl,end=hl+ln; while(p<end){ int h,l; int tag=TLV(tst,p,out h,out l); if(tag==0x18){ try{ string s=Encoding.ASCII.GetString(tst,p+h,l).TrimEnd('Z').Replace(',','.').Split('.')[0]; if(s.Length>14) s=s.Substring(0,14); return DateTime.ParseExact(s,"yyyyMMddHHmmss",null,System.Globalization.DateTimeStyles.AssumeUniversal|System.Globalization.DateTimeStyles.AdjustToUniversal); }catch{ return null; } } p+=h+l; } return null; }
   static X509Certificate2 CertFromSgnr(IntPtr sg){ if(sg==IntPtr.Zero)return null; if(Marshal.ReadInt32(sg,12)<1)return null; IntPtr ch=Marshal.ReadIntPtr(sg,16); if(ch==IntPtr.Zero)return null; IntPtr pc=Marshal.ReadIntPtr(ch,8); if(pc==IntPtr.Zero)return null; try{return new X509Certificate2(pc);}catch{return null;} }
-  static int WVT(ref WTD wd,out X509Certificate2 signer,out X509Certificate2 tsa,out DateTime? signTime){ signer=null;tsa=null;signTime=null; int res=WinVerifyTrust(IntPtr.Zero,GVV2,ref wd); if(wd.st!=IntPtr.Zero){ IntPtr pv=WTHelperProvDataFromStateData(wd.st); if(pv!=IntPtr.Zero){ signer=CertFromSgnr(WTHelperGetProvSignerFromChain(pv,0,false,0)); IntPtr cs=WTHelperGetProvSignerFromChain(pv,0,true,0); if(cs!=IntPtr.Zero){ tsa=CertFromSgnr(cs); long ft=Marshal.ReadInt64(cs,4); if(ft>0){ try{signTime=DateTime.FromFileTimeUtc(ft);}catch{} } } } } wd.sa=WTD_SAC; WinVerifyTrust(IntPtr.Zero,GVV2,ref wd); return res; }
+  static int WVT(ref WTD wd,out X509Certificate2 signer,out X509Certificate2 tsa,out DateTime? signTime){ signer=null;tsa=null;signTime=null; int res=WinVerifyTrust(IntPtr.Zero,GVV2,ref wd);
+    // WTD_SAV opened OS trust state; it MUST be closed with WTD_SAC or the state handle leaks.
+    // try/finally guarantees the close even if a Marshal read below throws.
+    try{ if(wd.st!=IntPtr.Zero){ IntPtr pv=WTHelperProvDataFromStateData(wd.st); if(pv!=IntPtr.Zero){ signer=CertFromSgnr(WTHelperGetProvSignerFromChain(pv,0,false,0)); IntPtr cs=WTHelperGetProvSignerFromChain(pv,0,true,0); if(cs!=IntPtr.Zero){ tsa=CertFromSgnr(cs); long ft=Marshal.ReadInt64(cs,4); if(ft>0){ try{signTime=DateTime.FromFileTimeUtc(ft);}catch{} } } } } }
+    finally{ wd.sa=WTD_SAC; WinVerifyTrust(IntPtr.Zero,GVV2,ref wd); }
+    return res; }
   static int VerifyBinary(string path,out X509Certificate2 signer,out string st,out X509Certificate2 tsa,out DateTime? signTime){ tsa=null; signTime=null;
     signer=null; st="None";
     var fi=new WFI(); fi.cb=(uint)Marshal.SizeOf(typeof(WFI)); fi.path=path; IntPtr pf=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WFI)));
@@ -47,7 +52,7 @@ public partial class Validator {
     try{ Marshal.StructureToPtr(fi,pf,false);
       var wd=new WTD(); wd.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd.ui=WTD_UI_NONE; wd.rev=WTD_REVOKE_NONE; wd.uc=WTD_CHOICE_FILE; wd.pUnion=pf; wd.sa=WTD_SAV;
       res=WVT(ref wd,out signer,out tsa,out signTime);
-    } finally{ Marshal.FreeHGlobal(pf); }
+    } finally{ Marshal.DestroyStructure(pf,typeof(WFI)); Marshal.FreeHGlobal(pf); }   // DestroyStructure frees the marshaled string field (path); FreeHGlobal alone leaks it every call
     if((uint)res!=0x800B0100){ if(res==0||signer!=null) st="Embedded"; return res; }
     IntPtr hFile=CreateFile(path,GR,FSR,IntPtr.Zero,OE,0,IntPtr.Zero); if(hFile==IntPtr.Zero||hFile==new IntPtr(-1)) return res;
     try{ uint cb=0; CryptCATAdminCalcHashFromFileHandle(hFile,ref cb,null,0); if(cb==0)return res; byte[] hash=new byte[cb]; if(!CryptCATAdminCalcHashFromFileHandle(hFile,ref cb,hash,0))return res;
@@ -61,7 +66,7 @@ public partial class Validator {
           pc2=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WCI))); Marshal.StructureToPtr(c2,pc2,false);
           var wd2=new WTD(); wd2.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd2.ui=WTD_UI_NONE; wd2.rev=WTD_REVOKE_NONE; wd2.uc=WTD_CHOICE_CATALOG; wd2.pUnion=pc2; wd2.sa=WTD_SAV;
           int cres=WVT(ref wd2,out signer,out tsa,out signTime); if(cres==0||signer!=null) st="Catalog"; return cres;
-        } finally{ if(pc2!=IntPtr.Zero) Marshal.FreeHGlobal(pc2); if(pH!=IntPtr.Zero) Marshal.FreeHGlobal(pH); CryptCATAdminReleaseCatalogContext(hCA,hCat,0); }
+        } finally{ if(pc2!=IntPtr.Zero){ Marshal.DestroyStructure(pc2,typeof(WCI)); Marshal.FreeHGlobal(pc2); } if(pH!=IntPtr.Zero) Marshal.FreeHGlobal(pH); CryptCATAdminReleaseCatalogContext(hCA,hCat,0); }   // DestroyStructure frees WCI's marshaled strings (cat/tag/mfile)
       } finally{ CryptCATAdminReleaseContext(hCA,0); }
     } finally{ CloseHandle(hFile); }
   }
@@ -72,13 +77,14 @@ public partial class Validator {
     try{ if(new FileInfo(path).Length > maxBytes) return null; }catch{ return null; }
     // Detect the BOM (UTF-16LE/BE, UTF-8 — normal for signed .ps1) and decode with it;
     // fall back to ISO-8859-1 for BOM-less ANSI/ASCII (byte-preserving for the SIG markers).
-    string[] lines;
-    try{ var ll=new System.Collections.Generic.List<string>(); using(var sr=new StreamReader(path,Encoding.GetEncoding(28591),true)){ string li; while((li=sr.ReadLine())!=null) ll.Add(li); } lines=ll.ToArray(); }catch{ return null; }
+    // Stream line-by-line instead of buffering the whole file into a List<string>: a large script
+    // (maxBytes is up to 500 MB) would otherwise materialize millions of string objects at once.
+    // Same scan, O(signature-block) memory.
     string pfx=null; var sb=new StringBuilder(); bool inb=false;
-    foreach(string raw in lines){ string t=raw.Trim();
+    try{ using(var sr=new StreamReader(path,Encoding.GetEncoding(28591),true)){ string raw; while((raw=sr.ReadLine())!=null){ string t=raw.Trim();
       int bi=t.IndexOf("Begin signature block"); if(bi>0){ pfx=t.Substring(0,bi).Trim(); inb=true; continue; }
       if(t.Contains("End signature block")){ inb=false; continue; }
-      if(inb && pfx!=null && t.StartsWith(pfx)) sb.Append(t.Substring(pfx.Length).Trim()); }
+      if(inb && pfx!=null && t.StartsWith(pfx)) sb.Append(t.Substring(pfx.Length).Trim()); } } }catch{ return null; }
     if(sb.Length==0) return null;
     try{ return Convert.FromBase64String(sb.ToString()); }catch{ return null; }
   }

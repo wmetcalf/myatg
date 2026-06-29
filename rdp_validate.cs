@@ -61,6 +61,7 @@ public class RdpVal {
     int unsignedCount=fileKeys.Count(k=>!signedScope.Contains(k));
     sb.Append(",\"signscope_count\":"+signedScope.Count(x=>x.Length>0)+",\"total_settings\":"+fileKeys.Count+",\"unsigned_settings\":"+unsignedCount);
     sb.Append(",\"unsigned_dangerous\":["+string.Join(",",unsignedDanger.Select(J))+"]");
+    if(signer!=null) signer.Dispose();   // SignerInfos[0].Certificate is a fresh X509Certificate2 wrapping an unmanaged handle; dispose it (mirrors myatg.cs) to avoid handle leaks in --serve
     return sb.Append("}").ToString();
   }
 }
