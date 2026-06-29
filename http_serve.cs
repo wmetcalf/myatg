@@ -66,14 +66,40 @@ public partial class Validator {
     return 0;
   }
 
-  // Routing added incrementally. Task 1: only /healthz.
   static void HandleRequest(HttpListenerContext ctx, ServeOpts o){
     HttpListenerRequest req = ctx.Request;
     HttpListenerResponse res = ctx.Response;
     try {
       string path = req.Url.AbsolutePath;
       if(req.HttpMethod=="GET" && path=="/healthz"){ WriteJson(res, 200, "{\"ok\":true}"); return; }
-      WriteJson(res, 404, "{\"error\":\"not found\"}");
+      if(path!="/validate"){ WriteJson(res, 404, "{\"error\":\"not found\"}"); return; }
+      if(req.HttpMethod!="POST"){ WriteJson(res, 405, "{\"error\":\"method not allowed\"}"); return; }
+      if(req.ContentLength64 > maxBytes){ WriteJson(res, 413, "{\"error\":\"file too large\"}"); return; }
+      string rev=o.Rev, scripts=o.Scripts;
+      var q=req.QueryString;
+      if(q["rev"]!=null) rev=q["rev"];
+      if(q["scripts"]!=null) scripts=q["scripts"];
+      string tmp = Path.GetTempFileName();
+      try {
+        long total=0; bool tooBig=false;
+        using(FileStream fs=new FileStream(tmp, FileMode.Create, FileAccess.Write)){
+          byte[] buf=new byte[65536]; int r; Stream ins=req.InputStream;
+          while((r=ins.Read(buf,0,buf.Length))>0){
+            total+=r;
+            if(total>maxBytes){ tooBig=true; break; }
+            fs.Write(buf,0,r);
+          }
+        }
+        if(tooBig){ WriteJson(res, 413, "{\"error\":\"file too large\"}"); return; }
+        if(total==0){ WriteJson(res, 400, "{\"error\":\"empty body\"}"); return; }
+        string verdict;
+        try { verdict = ValidateFile(tmp, rev, scripts); }
+        catch(OutOfMemoryException){ throw; }
+        catch(Exception e){ verdict = ErrJson(null,"UnknownError",e.GetType().Name); }
+        WriteJson(res, 200, verdict);
+      } finally {
+        try { File.Delete(tmp); } catch {}
+      }
     }
     catch(OutOfMemoryException){ throw; }
     catch(Exception){ try { WriteJson(res, 500, "{\"error\":\"internal\"}"); } catch {} }

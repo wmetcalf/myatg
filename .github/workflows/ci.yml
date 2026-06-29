@@ -47,6 +47,45 @@ jobs:
             Stop-Process -Id $p.Id -Force
           }
 
+      - name: Smoke — POST /validate matches one-shot verdict
+        shell: pwsh
+        run: |
+          .\myatg.exe C:\Windows\System32\whoami.exe > oneshot.json
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8138' -PassThru
+          Start-Sleep -Seconds 2
+          try {
+            $bytes = [System.IO.File]::ReadAllBytes('C:\Windows\System32\whoami.exe')
+            $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8138/validate' -Method Post -Body $bytes -ContentType 'application/octet-stream' -TimeoutSec 30
+            $http = ($r.Content | ConvertFrom-Json)
+            $one  = (Get-Content oneshot.json -Raw | ConvertFrom-Json)
+            if ($http.file_sha256 -ne $one.file_sha256) { Write-Error 'sha mismatch'; exit 1 }
+            if ($http.status -ne $one.status) { Write-Error 'status mismatch'; exit 1 }
+            Write-Host ('validate ok: ' + $http.status)
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+
+      - name: Smoke — 8 concurrent /validate requests
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8139' -PassThru
+          Start-Sleep -Seconds 2
+          try {
+            $bytes = [System.IO.File]::ReadAllBytes('C:\Windows\System32\whoami.exe')
+            $jobs = 1..8 | ForEach-Object {
+              Start-Job -ScriptBlock {
+                param($b)
+                (Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8139/validate' -Method Post -Body $b -TimeoutSec 30).StatusCode
+              } -ArgumentList (,$bytes)
+            }
+            $codes = $jobs | Wait-Job | Receive-Job
+            $jobs | Remove-Job
+            if (($codes | Where-Object { $_ -ne 200 }).Count -gt 0) { Write-Error ('non-200: ' + ($codes -join ',')); exit 1 }
+            Write-Host 'concurrency ok'
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+
       - name: Upload myatg.exe
         uses: actions/upload-artifact@v4
         with:
