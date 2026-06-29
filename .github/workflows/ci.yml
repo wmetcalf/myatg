@@ -106,6 +106,29 @@ jobs:
             Stop-Process -Id $p.Id -Force
           }
 
+      - name: Smoke — token auth + fail-closed bind
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8141','--token','s3cret' -PassThru
+          Start-Sleep -Seconds 2
+          function Code($sb){ try { & $sb | Out-Null; return 0 } catch { return [int]$_.Exception.Response.StatusCode } }
+          try {
+            $bytes = [System.IO.File]::ReadAllBytes('C:\Windows\System32\whoami.exe')
+            $noTok = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -TimeoutSec 30 }
+            if ($noTok -ne 401) { Write-Error "missing token: $noTok"; exit 1 }
+            $badTok = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -Headers @{Authorization='Bearer nope'} -TimeoutSec 30 }
+            if ($badTok -ne 401) { Write-Error "bad token: $badTok"; exit 1 }
+            $ok = (Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -Headers @{Authorization='Bearer s3cret'} -TimeoutSec 30).StatusCode
+            if ($ok -ne 200) { Write-Error "good token: $ok"; exit 1 }
+            Write-Host 'token auth ok'
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+          # fail-closed: non-loopback bind without token must exit non-zero and not listen
+          $q = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--bind','0.0.0.0','--port','8142' -Wait -PassThru
+          if ($q.ExitCode -eq 0) { Write-Error 'expected non-zero exit for insecure bind'; exit 1 }
+          Write-Host 'fail-closed ok'
+
       - name: Upload myatg.exe
         uses: actions/upload-artifact@v4
         with:

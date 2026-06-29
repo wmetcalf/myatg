@@ -72,6 +72,11 @@ public partial class Validator {
     try {
       string path = req.Url.AbsolutePath;
       if(req.HttpMethod=="GET" && path=="/healthz"){ WriteJson(res, 200, "{\"ok\":true}"); return; }
+      if(o.Token!=null){
+        string hdr=req.Headers["Authorization"];
+        string bearer=(hdr!=null && hdr.StartsWith("Bearer ")) ? hdr.Substring(7) : null;
+        if(!FixedEquals(o.Token, bearer)){ WriteJson(res, 401, "{\"error\":\"unauthorized\"}"); return; }
+      }
       if(path!="/validate"){ WriteJson(res, 404, "{\"error\":\"not found\"}"); return; }
       if(req.HttpMethod!="POST"){ WriteJson(res, 405, "{\"error\":\"method not allowed\"}"); return; }
       if(req.ContentLength64 > maxBytes){ WriteJson(res, 413, "{\"error\":\"file too large\"}"); return; }
@@ -103,6 +108,15 @@ public partial class Validator {
     }
     catch(OutOfMemoryException){ throw; }
     catch(Exception){ try { WriteJson(res, 500, "{\"error\":\"internal\"}"); } catch {} }
+  }
+
+  // Constant-time compare so the token check leaks no timing signal.
+  static bool FixedEquals(string a, string b){
+    if(a==null||b==null) return false;
+    byte[] x=Encoding.UTF8.GetBytes(a), y=Encoding.UTF8.GetBytes(b);
+    int diff = x.Length ^ y.Length;
+    for(int i=0;i<x.Length;i++) diff |= x[i] ^ y[(i<y.Length)?i:0];
+    return diff==0;
   }
 
   static void WriteJson(HttpListenerResponse res, int code, string body){
