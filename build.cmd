@@ -6,5 +6,5 @@ if not exist "%CSC%" (
   echo error: csc.exe not found at %CSC% -- needs .NET Framework 4.x ^(x64^) >&2
   exit /b 1
 )
-"%CSC%" /nologo /r:System.Security.dll /out:myatg.exe myatg.cs rdp_validate.cs
+"%CSC%" /nologo /r:System.Security.dll /out:myatg.exe myatg.cs rdp_validate.cs http_serve.cs
 endlocal

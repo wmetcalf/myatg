@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
-public class Validator {
+public partial class Validator {
   static readonly Guid GVV2 = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
   const uint WTD_UI_NONE=2,WTD_REVOKE_NONE=0,WTD_CHOICE_FILE=1,WTD_CHOICE_CATALOG=2,WTD_SAV=1,WTD_SAC=2;
   const uint GR=0x80000000,FSR=1,OE=3;
@@ -214,13 +214,28 @@ public class Validator {
     if(IntPtr.Size!=8) Console.Error.WriteLine("warning: validator assumes x86_64 P/Invoke layout; pointer size="+IntPtr.Size);
     try{ var _e=Environment.GetEnvironmentVariable("VALIDATOR_MAX_SIZE_MB"); long _m; if(_e!=null&&long.TryParse(_e,out _m)&&_m>0&&_m<=long.MaxValue/(1024L*1024L)) maxBytes=_m*1024L*1024L; }catch{}
     string path=null, gvCsv=null, rev="online", warmDir=null; int iters=1;
-    for(int i=0;i<a.Length;i++){ if(a[i]=="--gv"&&i+1<a.Length){gvCsv=a[++i];} else if(a[i]=="--rev"&&i+1<a.Length){rev=a[++i];} else if(a[i]=="--iters"&&i+1<a.Length){iters=int.Parse(a[++i]);} else if(a[i]=="--refresh"){} else if(a[i]=="--warm-cache"&&i+1<a.Length){warmDir=a[++i];} else if(a[i]=="--max-size"&&i+1<a.Length){ long _mb; if(long.TryParse(a[++i],out _mb)&&_mb>0&&_mb<=long.MaxValue/(1024L*1024L)) maxBytes=_mb*1024L*1024L; } else if(a[i]=="--serve"){} else if(a[i]=="--scripts"&&i+1<a.Length){i++;} else if(a[i].StartsWith("--")){ Console.Error.WriteLine("warning: unknown flag "+a[i]); } else path=a[i]; }
+    for(int i=0;i<a.Length;i++){ if(a[i]=="--gv"&&i+1<a.Length){gvCsv=a[++i];} else if(a[i]=="--rev"&&i+1<a.Length){rev=a[++i];} else if(a[i]=="--iters"&&i+1<a.Length){iters=int.Parse(a[++i]);} else if(a[i]=="--refresh"){} else if(a[i]=="--warm-cache"&&i+1<a.Length){warmDir=a[++i];} else if(a[i]=="--max-size"&&i+1<a.Length){ long _mb; if(long.TryParse(a[++i],out _mb)&&_mb>0&&_mb<=long.MaxValue/(1024L*1024L)) maxBytes=_mb*1024L*1024L; } else if(a[i]=="--serve"){} else if(a[i]=="--scripts"&&i+1<a.Length){i++;} else if(a[i]=="--serve-http"){} else if(a[i]=="--service"){} else if(a[i]=="--install-service"){} else if(a[i]=="--uninstall-service"){} else if(a[i]=="--bind"&&i+1<a.Length){i++;} else if(a[i]=="--port"&&i+1<a.Length){i++;} else if(a[i]=="--token"&&i+1<a.Length){i++;} else if(a[i]=="--allow-insecure"){} else if(a[i].StartsWith("--")){ Console.Error.WriteLine("warning: unknown flag "+a[i]); } else path=a[i]; }
     if(rev!="online"&&rev!="offline"&&rev!="none"){ Console.Error.WriteLine("warning: invalid --rev \""+rev+"\", using online"); rev="online"; }
     string scriptMode="ps"; for(int i=0;i<a.Length;i++){ if(a[i]=="--scripts"&&i+1<a.Length) scriptMode=a[i+1]; }
     bool refresh=false; foreach(var x in a) if(x=="--refresh") refresh=true;
     if(refresh){ string rr=RefreshTrust(); if(path==null){ Console.WriteLine(rr); return; } Console.Error.WriteLine("refresh: "+rr); }
     if(gvCsv!=null) LoadGraveyard(gvCsv);
     if(warmDir!=null){ Console.WriteLine(WarmCache(warmDir)); return; }
+    bool serveHttp=false, svc=false, installSvc=false, uninstallSvc=false;
+    foreach(var x in a){ if(x=="--serve-http")serveHttp=true; else if(x=="--service")svc=true; else if(x=="--install-service")installSvc=true; else if(x=="--uninstall-service")uninstallSvc=true; }
+    if(serveHttp||svc||installSvc||uninstallSvc){
+      ServeOpts o=new ServeOpts(); o.Rev=rev; o.Scripts=scriptMode;
+      for(int i=0;i<a.Length;i++){
+        if(a[i]=="--bind"&&i+1<a.Length) o.Bind=a[++i];
+        else if(a[i]=="--port"&&i+1<a.Length) int.TryParse(a[++i], out o.Port);
+        else if(a[i]=="--token"&&i+1<a.Length) o.Token=a[++i];
+        else if(a[i]=="--allow-insecure") o.AllowInsecure=true;
+      }
+      if(installSvc){ Environment.Exit(InstallService(o)); }
+      if(uninstallSvc){ Environment.Exit(UninstallService(o)); }
+      if(svc){ RunService(o); return; }
+      Environment.Exit(ServeHttp(o));
+    }
     bool serve=false; foreach(var x in a) if(x=="--serve") serve=true;
     if(serve){
       // Persistent warm-server: one file path per stdin line -> one JSON line, until EOF/"quit".

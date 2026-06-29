@@ -15,7 +15,7 @@ jobs:
         shell: cmd
         run: |
           set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
-          "%CSC%" /nologo /r:System.Security.dll /out:myatg.exe myatg.cs rdp_validate.cs
+          "%CSC%" /nologo /r:System.Security.dll /out:myatg.exe myatg.cs rdp_validate.cs http_serve.cs
 
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
@@ -33,6 +33,19 @@ jobs:
           type serve.json
           for /f %%c in ('findstr /C:"\"file_sha256\"" serve.json ^| find /c /v ""') do set N=%%c
           if not "%N%"=="2" ( echo expected 2 verdict lines, got %N% & exit /b 1 )
+
+      - name: Smoke — --serve-http /healthz
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8137' -PassThru
+          Start-Sleep -Seconds 2
+          try {
+            $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8137/healthz' -TimeoutSec 5
+            if (-not $r.ok) { Write-Error 'healthz not ok'; exit 1 }
+            Write-Host 'healthz ok'
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
 
       - name: Upload myatg.exe
         uses: actions/upload-artifact@v4
