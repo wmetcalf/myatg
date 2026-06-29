@@ -86,6 +86,26 @@ jobs:
             Stop-Process -Id $p.Id -Force
           }
 
+      - name: Smoke — /validate error codes
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8140','--max-size','1' -PassThru
+          Start-Sleep -Seconds 2
+          function Code($sb){ try { & $sb | Out-Null; return 0 } catch { return [int]$_.Exception.Response.StatusCode } }
+          try {
+            $wrongMethod = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8140/validate' -Method Get -TimeoutSec 10 }
+            if ($wrongMethod -ne 405) { Write-Error "method: $wrongMethod"; exit 1 }
+            $notFound = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8140/nope' -Method Post -Body 'x' -TimeoutSec 10 }
+            if ($notFound -ne 404) { Write-Error "route: $notFound"; exit 1 }
+            $empty = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8140/validate' -Method Post -Body ([byte[]]@()) -TimeoutSec 10 }
+            if ($empty -ne 400) { Write-Error "empty: $empty"; exit 1 }
+            $big = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8140/validate' -Method Post -Body (New-Object byte[] (2*1024*1024)) -TimeoutSec 30 }
+            if ($big -ne 413) { Write-Error "oversize: $big"; exit 1 }
+            Write-Host 'error codes ok'
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+
       - name: Upload myatg.exe
         uses: actions/upload-artifact@v4
         with:
