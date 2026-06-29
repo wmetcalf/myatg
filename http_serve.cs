@@ -84,7 +84,12 @@ public partial class Validator {
       var q=req.QueryString;
       if(q["rev"]!=null) rev=q["rev"];
       if(q["scripts"]!=null) scripts=q["scripts"];
-      string tmp = Path.GetTempFileName();
+      // The extension is part of the verdict: ValidateFile routes .rdp to the RDP validator
+      // and script SIP verification (.ps1/.vbs/.js/...) keys on it. The host POSTs the original
+      // name as ?name=; preserve a sanitized extension on the temp file (else everything lands
+      // as .tmp and signed scripts read NotSigned / .rdp takes the wrong path). Mirrors the
+      // guest-agent's Scan-Path: keep only a safe ^\.[A-Za-z0-9]{1,8}$ extension, else none.
+      string tmp = Path.Combine(Path.GetTempPath(), "myatg_"+Guid.NewGuid().ToString("N")+SafeExt(q["name"]));
       try {
         long total=0; bool tooBig=false;
         using(FileStream fs=new FileStream(tmp, FileMode.Create, FileAccess.Write)){
@@ -117,6 +122,19 @@ public partial class Validator {
     int diff = x.Length ^ y.Length;
     for(int i=0;i<x.Length;i++) diff |= x[i] ^ y[(i<y.Length)?i:0];
     return diff==0;
+  }
+
+  // Extract a safe extension from a request-supplied filename: leading '.', then 1-8
+  // alphanumerics, lowercased. Anything else (no ext, too long, odd chars, path separators)
+  // yields "". No exceptions, no path-char parsing — the name is untrusted.
+  static string SafeExt(string name){
+    if(string.IsNullOrEmpty(name)) return "";
+    int dot = name.LastIndexOf('.');
+    if(dot < 0 || dot == name.Length-1) return "";
+    string ext = name.Substring(dot);
+    if(ext.Length < 2 || ext.Length > 9) return "";
+    for(int i=1;i<ext.Length;i++){ char c=ext[i]; if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9'))) return ""; }
+    return ext.ToLowerInvariant();
   }
 
   static void WriteJson(HttpListenerResponse res, int code, string body){

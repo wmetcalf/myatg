@@ -55,7 +55,7 @@ jobs:
           Start-Sleep -Seconds 2
           try {
             $bytes = [System.IO.File]::ReadAllBytes('C:\Windows\System32\whoami.exe')
-            $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8138/validate' -Method Post -Body $bytes -ContentType 'application/octet-stream' -TimeoutSec 30
+            $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8138/validate?name=whoami.exe' -Method Post -Body $bytes -ContentType 'application/octet-stream' -TimeoutSec 30
             $http = ($r.Content | ConvertFrom-Json)
             $one  = (Get-Content oneshot.json -Raw | ConvertFrom-Json)
             if ($http.file_sha256 -ne $one.file_sha256) { Write-Error 'sha mismatch'; exit 1 }

@@ -141,10 +141,14 @@ Endpoints:
 
 - `GET  /healthz`  → `{"ok":true}` (no auth)
 - `POST /validate` → body = raw file bytes; returns the verdict JSON.
-  Optional query overrides: `?rev=online|offline|none`, `?scripts=ps|native`.
+  Pass the original name as **`?name=<file>`** — its **extension** selects the validation
+  path (`.rdp` → RDP validator; the script SIP for `.ps1`/`.vbs`/`.js`/…), so omitting it can
+  change the verdict for scripts and RDP files (they read as unsigned). PE files (`.exe`/`.dll`)
+  are content-routed, so the name is irrelevant there. Optional query overrides:
+  `?rev=online|offline|none`, `?scripts=ps|native`.
 
 ```sh
-curl --data-binary @sample.exe http://127.0.0.1:8137/validate
+curl --data-binary @sample.vbs "http://127.0.0.1:8137/validate?name=sample.vbs"
 ```
 
 **Serve flags:** `--bind <addr>` (default `127.0.0.1`), `--port <n>` (default `8137`),
