@@ -77,7 +77,7 @@ public partial class Validator {
               var wd2=new WTD(); wd2.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd2.ui=WTD_UI_NONE; wd2.rev=WTD_REVOKE_NONE; wd2.uc=WTD_CHOICE_CATALOG; wd2.pUnion=pc2; wd2.sa=WTD_SAV;
               X509Certificate2 s2=null, t2=null; DateTime? st2=null;
               int cres=WVT(ref wd2,out s2,out t2,out st2);
-              if(cres==0){ signer=s2; tsa=t2; signTime=st2; st="Catalog"; if(lastSigner!=null)lastSigner.Dispose(); if(lastTsa!=null)lastTsa.Dispose(); return cres; }
+              if(cres==0){ signer=s2; tsa=t2; signTime=st2; st="Catalog"; if(lastSigner!=null)lastSigner.Dispose(); if(lastTsa!=null)lastTsa.Dispose(); CryptCATAdminReleaseCatalogContext(hCA,hCat,0); return cres; }   // success path skips the loop's advance-release, so free this catalog context explicitly
               if(lastSigner!=null)lastSigner.Dispose(); if(lastTsa!=null)lastTsa.Dispose();
               lastSigner=s2; lastTsa=t2; lastSt=st2; catRes=cres; anyCat=true;
             } finally{ if(pc2!=IntPtr.Zero){ Marshal.DestroyStructure(pc2,typeof(WCI)); Marshal.FreeHGlobal(pc2); } if(pH!=IntPtr.Zero) Marshal.FreeHGlobal(pH); }
@@ -353,7 +353,7 @@ public partial class Validator {
       b.Append(",\"status\":").Append(J(status)).Append(",\"signature_type\":").Append(J(sigType)).Append(",\"content_verified\":").Append(contentOk?"true":"false"); if(diag!=null) b.Append(",\"error\":").Append(J(diag));
       b.Append(",\"is_os_binary\":").Append(IsOS(sigType,signer)?"true":"false"); b.Append(",\"signer\":").Append(CertJson(signer)); b.Append(",\"chain\":").Append(chainJson); b.Append(",\"graveyard\":").Append(GraveyardJson(signer!=null?signer.Thumbprint:psThumb, signer!=null?signer.SerialNumber:null, signer!=null?TbsAlg(signer,"SHA256"):null, sha)); b.Append(",\"timestamped\":").Append(tsa!=null?"true":"false"); b.Append(",\"sign_time\":").Append(signTime.HasValue?J(signTime.Value.ToString("o")):"null"); b.Append(",\"sign_time_verified\":").Append((signTime.HasValue&&stVerified)?"true":"false"); b.Append(",\"timestamper\":").Append(CertJson(tsa));
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
-      if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose();
+      if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); }   // each embedded/CMS cert wraps an unmanaged handle; dispose promptly (long-running serve mode)
       return b.ToString();
       }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} return ErrJson(sha,"UnknownError",_ex.GetType().Name); }
   }
