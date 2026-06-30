@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
-public class Validator {
+public partial class Validator {
   static readonly Guid GVV2 = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
   const uint WTD_UI_NONE=2,WTD_REVOKE_NONE=0,WTD_CHOICE_FILE=1,WTD_CHOICE_CATALOG=2,WTD_SAV=1,WTD_SAC=2;
   const uint GR=0x80000000,FSR=1,OE=3;
@@ -39,7 +39,12 @@ public class Validator {
 
   static DateTime? TstGenTime(byte[] tst){ int hl,ln; TLV(tst,0,out hl,out ln); int p=hl,end=hl+ln; while(p<end){ int h,l; int tag=TLV(tst,p,out h,out l); if(tag==0x18){ try{ string s=Encoding.ASCII.GetString(tst,p+h,l).TrimEnd('Z').Replace(',','.').Split('.')[0]; if(s.Length>14) s=s.Substring(0,14); return DateTime.ParseExact(s,"yyyyMMddHHmmss",null,System.Globalization.DateTimeStyles.AssumeUniversal|System.Globalization.DateTimeStyles.AdjustToUniversal); }catch{ return null; } } p+=h+l; } return null; }
   static X509Certificate2 CertFromSgnr(IntPtr sg){ if(sg==IntPtr.Zero)return null; if(Marshal.ReadInt32(sg,12)<1)return null; IntPtr ch=Marshal.ReadIntPtr(sg,16); if(ch==IntPtr.Zero)return null; IntPtr pc=Marshal.ReadIntPtr(ch,8); if(pc==IntPtr.Zero)return null; try{return new X509Certificate2(pc);}catch{return null;} }
-  static int WVT(ref WTD wd,out X509Certificate2 signer,out X509Certificate2 tsa,out DateTime? signTime){ signer=null;tsa=null;signTime=null; int res=WinVerifyTrust(IntPtr.Zero,GVV2,ref wd); if(wd.st!=IntPtr.Zero){ IntPtr pv=WTHelperProvDataFromStateData(wd.st); if(pv!=IntPtr.Zero){ signer=CertFromSgnr(WTHelperGetProvSignerFromChain(pv,0,false,0)); IntPtr cs=WTHelperGetProvSignerFromChain(pv,0,true,0); if(cs!=IntPtr.Zero){ tsa=CertFromSgnr(cs); long ft=Marshal.ReadInt64(cs,4); if(ft>0){ try{signTime=DateTime.FromFileTimeUtc(ft);}catch{} } } } } wd.sa=WTD_SAC; WinVerifyTrust(IntPtr.Zero,GVV2,ref wd); return res; }
+  static int WVT(ref WTD wd,out X509Certificate2 signer,out X509Certificate2 tsa,out DateTime? signTime){ signer=null;tsa=null;signTime=null; int res=WinVerifyTrust(IntPtr.Zero,GVV2,ref wd);
+    // WTD_SAV opened OS trust state; it MUST be closed with WTD_SAC or the state handle leaks.
+    // try/finally guarantees the close even if a Marshal read below throws.
+    try{ if(wd.st!=IntPtr.Zero){ IntPtr pv=WTHelperProvDataFromStateData(wd.st); if(pv!=IntPtr.Zero){ signer=CertFromSgnr(WTHelperGetProvSignerFromChain(pv,0,false,0)); IntPtr cs=WTHelperGetProvSignerFromChain(pv,0,true,0); if(cs!=IntPtr.Zero){ tsa=CertFromSgnr(cs); long ft=Marshal.ReadInt64(cs,4); if(ft>0){ try{signTime=DateTime.FromFileTimeUtc(ft);}catch{} } } } } }
+    finally{ wd.sa=WTD_SAC; WinVerifyTrust(IntPtr.Zero,GVV2,ref wd); }
+    return res; }
   static int VerifyBinary(string path,out X509Certificate2 signer,out string st,out X509Certificate2 tsa,out DateTime? signTime){ tsa=null; signTime=null;
     signer=null; st="None";
     var fi=new WFI(); fi.cb=(uint)Marshal.SizeOf(typeof(WFI)); fi.path=path; IntPtr pf=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WFI)));
@@ -47,38 +52,69 @@ public class Validator {
     try{ Marshal.StructureToPtr(fi,pf,false);
       var wd=new WTD(); wd.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd.ui=WTD_UI_NONE; wd.rev=WTD_REVOKE_NONE; wd.uc=WTD_CHOICE_FILE; wd.pUnion=pf; wd.sa=WTD_SAV;
       res=WVT(ref wd,out signer,out tsa,out signTime);
-    } finally{ Marshal.FreeHGlobal(pf); }
+    } finally{ Marshal.DestroyStructure(pf,typeof(WFI)); Marshal.FreeHGlobal(pf); }   // DestroyStructure frees the marshaled string field (path); FreeHGlobal alone leaks it every call
     if((uint)res!=0x800B0100){ if(res==0||signer!=null) st="Embedded"; return res; }
     IntPtr hFile=CreateFile(path,GR,FSR,IntPtr.Zero,OE,0,IntPtr.Zero); if(hFile==IntPtr.Zero||hFile==new IntPtr(-1)) return res;
     try{ uint cb=0; CryptCATAdminCalcHashFromFileHandle(hFile,ref cb,null,0); if(cb==0)return res; byte[] hash=new byte[cb]; if(!CryptCATAdminCalcHashFromFileHandle(hFile,ref cb,hash,0))return res;
       string tag=BitConverter.ToString(hash).Replace("-",""); IntPtr hCA=IntPtr.Zero; if(!CryptCATAdminAcquireContext(ref hCA,IntPtr.Zero,0))return res;
-      try{ IntPtr prev=IntPtr.Zero; IntPtr hCat=CryptCATAdminEnumCatalogFromHash(hCA,hash,cb,0,ref prev); if(hCat==IntPtr.Zero)return res;
-        var ci=new CATINFO(); ci.cb=(uint)Marshal.SizeOf(typeof(CATINFO)); if(!CryptCATCatalogInfoFromContext(hCat,ref ci,0)){CryptCATAdminReleaseCatalogContext(hCA,hCat,0);return res;}
-        IntPtr pH=IntPtr.Zero, pc2=IntPtr.Zero;
-        try{
-          pH=Marshal.AllocHGlobal(hash.Length); Marshal.Copy(hash,0,pH,hash.Length);
-          var c2=new WCI(); c2.cb=(uint)Marshal.SizeOf(typeof(WCI)); c2.cat=ci.file; c2.tag=tag; c2.mfile=path; c2.hMember=hFile; c2.pHash=pH; c2.cbHash=cb; c2.hCat=hCA;
-          pc2=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WCI))); Marshal.StructureToPtr(c2,pc2,false);
-          var wd2=new WTD(); wd2.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd2.ui=WTD_UI_NONE; wd2.rev=WTD_REVOKE_NONE; wd2.uc=WTD_CHOICE_CATALOG; wd2.pUnion=pc2; wd2.sa=WTD_SAV;
-          int cres=WVT(ref wd2,out signer,out tsa,out signTime); if(cres==0||signer!=null) st="Catalog"; return cres;
-        } finally{ if(pc2!=IntPtr.Zero) Marshal.FreeHGlobal(pc2); if(pH!=IntPtr.Zero) Marshal.FreeHGlobal(pH); CryptCATAdminReleaseCatalogContext(hCA,hCat,0); }
+      try{
+        IntPtr prev=IntPtr.Zero; IntPtr hCat=CryptCATAdminEnumCatalogFromHash(hCA,hash,cb,0,ref prev);
+        if(hCat==IntPtr.Zero) return res;
+        // A hash can match several catalogs and the first isn't necessarily the trusted one. Try each
+        // until one fully verifies (cres==0); otherwise keep the last catalog's signer as the fallback
+        // so a single untrusted catalog yields the same verdict as before. Advancing via the prev
+        // parameter frees the previous context, so there is no explicit per-iteration release.
+        int catRes=res; bool anyCat=false;
+        X509Certificate2 lastSigner=null, lastTsa=null; DateTime? lastSt=null;
+        while(hCat!=IntPtr.Zero){
+          var ci=new CATINFO(); ci.cb=(uint)Marshal.SizeOf(typeof(CATINFO));
+          if(CryptCATCatalogInfoFromContext(hCat,ref ci,0)){
+            IntPtr pH=IntPtr.Zero, pc2=IntPtr.Zero;
+            try{
+              pH=Marshal.AllocHGlobal(hash.Length); Marshal.Copy(hash,0,pH,hash.Length);
+              var c2=new WCI(); c2.cb=(uint)Marshal.SizeOf(typeof(WCI)); c2.cat=ci.file; c2.tag=tag; c2.mfile=path; c2.hMember=hFile; c2.pHash=pH; c2.cbHash=cb; c2.hCat=hCA;
+              pc2=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WCI))); Marshal.StructureToPtr(c2,pc2,false);
+              var wd2=new WTD(); wd2.cb=(uint)Marshal.SizeOf(typeof(WTD)); wd2.ui=WTD_UI_NONE; wd2.rev=WTD_REVOKE_NONE; wd2.uc=WTD_CHOICE_CATALOG; wd2.pUnion=pc2; wd2.sa=WTD_SAV;
+              X509Certificate2 s2=null, t2=null; DateTime? st2=null;
+              int cres=WVT(ref wd2,out s2,out t2,out st2);
+              if(cres==0){ signer=s2; tsa=t2; signTime=st2; st="Catalog"; if(lastSigner!=null)lastSigner.Dispose(); if(lastTsa!=null)lastTsa.Dispose(); CryptCATAdminReleaseCatalogContext(hCA,hCat,0); return cres; }   // success path skips the loop's advance-release, so free this catalog context explicitly
+              if(lastSigner!=null)lastSigner.Dispose(); if(lastTsa!=null)lastTsa.Dispose();
+              lastSigner=s2; lastTsa=t2; lastSt=st2; catRes=cres; anyCat=true;
+            } finally{ if(pc2!=IntPtr.Zero){ Marshal.DestroyStructure(pc2,typeof(WCI)); Marshal.FreeHGlobal(pc2); } if(pH!=IntPtr.Zero) Marshal.FreeHGlobal(pH); }
+          }
+          IntPtr cur=hCat; hCat=CryptCATAdminEnumCatalogFromHash(hCA,hash,cb,0,ref cur);
+        }
+        if(anyCat){ signer=lastSigner; tsa=lastTsa; signTime=lastSt; if(signer!=null) st="Catalog"; }
+        return catRes;
       } finally{ CryptCATAdminReleaseContext(hCA,0); }
     } finally{ CloseHandle(hFile); }
   }
-  static int TLV(byte[] b,int o,out int hl,out int ln){ int tag=b[o]; int p=o+1; int l=b[p++]; if(l>=0x80){int n=l&0x7F;l=0;for(int i=0;i<n;i++)l=(l<<8)|b[p++];} hl=p-o; ln=l; return tag; }
-  static byte[] Sub(byte[] b,int o,int l){ var r=new byte[l]; Array.Copy(b,o,r,0,l); return r; }
+  // ASN.1 DER tag/length reader. Bounds-checked: the content (ec=cms.ContentInfo.Content) is opaque
+  // to SignedCms.Decode, so its nested length fields are attacker-controlled. Reject a length-of-length
+  // past the buffer, an absurd length-of-length, a negative (overflowed) length, or a content length
+  // that exceeds the buffer — otherwise Sub would allocate `new byte[length]` from an attacker DER
+  // field (up to ~2GB) and OOM-crash the persistent service before any range check.
+  static int TLV(byte[] b,int o,out int hl,out int ln){ hl=0; ln=0;
+    if(b==null||o<0||o>=b.Length) throw new Exception("der: offset out of range");
+    int tag=b[o]; int p=o+1; if(p>=b.Length) throw new Exception("der: truncated length");
+    int l=b[p++];
+    if(l>=0x80){ int n=l&0x7F; if(n>4) throw new Exception("der: length-of-length too large"); if(p+n>b.Length) throw new Exception("der: truncated length"); l=0; for(int i=0;i<n;i++) l=(l<<8)|b[p++]; }
+    if(l<0||l>b.Length) throw new Exception("der: content length out of range");
+    hl=p-o; ln=l; return tag; }
+  static byte[] Sub(byte[] b,int o,int l){ if(b==null||o<0||l<0||o>b.Length||l>b.Length-o) throw new Exception("der: sub-range out of bounds"); var r=new byte[l]; Array.Copy(b,o,r,0,l); return r; }
   static string Oid(byte[] b){ var s=new StringBuilder(); s.Append(b[0]/40).Append('.').Append(b[0]%40); long v=0; for(int i=1;i<b.Length;i++){v=(v<<7)|(uint)(b[i]&0x7F); if((b[i]&0x80)==0){s.Append('.').Append(v);v=0;}} return s.ToString(); }
   static byte[] ScriptPkcs7(string path){
     try{ if(new FileInfo(path).Length > maxBytes) return null; }catch{ return null; }
     // Detect the BOM (UTF-16LE/BE, UTF-8 — normal for signed .ps1) and decode with it;
     // fall back to ISO-8859-1 for BOM-less ANSI/ASCII (byte-preserving for the SIG markers).
-    string[] lines;
-    try{ var ll=new System.Collections.Generic.List<string>(); using(var sr=new StreamReader(path,Encoding.GetEncoding(28591),true)){ string li; while((li=sr.ReadLine())!=null) ll.Add(li); } lines=ll.ToArray(); }catch{ return null; }
+    // Stream line-by-line instead of buffering the whole file into a List<string>: a large script
+    // (maxBytes is up to 500 MB) would otherwise materialize millions of string objects at once.
+    // Same scan, O(signature-block) memory.
     string pfx=null; var sb=new StringBuilder(); bool inb=false;
-    foreach(string raw in lines){ string t=raw.Trim();
+    try{ using(var sr=new StreamReader(path,Encoding.GetEncoding(28591),true)){ string raw; while((raw=sr.ReadLine())!=null){ string t=raw.Trim();
       int bi=t.IndexOf("Begin signature block"); if(bi>0){ pfx=t.Substring(0,bi).Trim(); inb=true; continue; }
       if(t.Contains("End signature block")){ inb=false; continue; }
-      if(inb && pfx!=null && t.StartsWith(pfx)) sb.Append(t.Substring(pfx.Length).Trim()); }
+      if(inb && pfx!=null && t.StartsWith(pfx)) sb.Append(t.Substring(pfx.Length).Trim()); } } }catch{ return null; }
     if(sb.Length==0) return null;
     try{ return Convert.FromBase64String(sb.ToString()); }catch{ return null; }
   }
@@ -123,7 +159,17 @@ public class Validator {
   // AIA = SEQUENCE OF AccessDescription{ accessMethod OID, accessLocation GeneralName }; split caIssuers (..48.2) vs OCSP (..48.1)
   static void AiaUrls(X509Certificate2 c, System.Collections.Generic.List<string> ca, System.Collections.Generic.List<string> ocsp){ foreach(var ext in c.Extensions){ if(ext.Oid.Value!="1.3.6.1.5.5.7.1.1") continue; try{ byte[] raw=ext.RawData; int hl,ln; if(TLV(raw,0,out hl,out ln)!=0x30) continue; int p=hl,end=hl+ln; while(p+1<end){ int h2,l2; int t2=TLV(raw,p,out h2,out l2); int cs=p+h2; if(l2<0||cs+l2>end) break; if(t2==0x30){ int ip=cs,iend=cs+l2; string method=null,uri=null; while(ip+1<iend){ int h3,l3; int t3=TLV(raw,ip,out h3,out l3); int ccs=ip+h3; if(l3<0||ccs+l3>iend) break; if(t3==0x06) method=Oid(Sub(raw,ccs,l3)); else if(t3==0x86) uri=Encoding.ASCII.GetString(raw,ccs,l3).Trim(); ip=ccs+l3; } if(uri!=null&&uri.Length>0){ if(method=="1.3.6.1.5.5.7.48.2"){ if(!ca.Contains(uri))ca.Add(uri); } else if(method=="1.3.6.1.5.5.7.48.1"){ if(!ocsp.Contains(uri))ocsp.Add(uri); } } } p=cs+l2; } }catch{} } }
   static bool SelfIssued(X509Certificate2 c){ byte[] su=c.SubjectName.RawData, iss=c.IssuerName.RawData; if(su.Length!=iss.Length) return false; for(int k=0;k<su.Length;k++) if(su[k]!=iss[k]) return false; return true; }
-  static bool IsTrustedRoot(X509Certificate2 c){ if(c==null) return false; foreach(var loc in new[]{StoreLocation.LocalMachine,StoreLocation.CurrentUser}){ try{ using(var st=new X509Store(StoreName.Root,loc)){ st.Open(OpenFlags.ReadOnly); if(st.Certificates.Find(X509FindType.FindByThumbprint,c.Thumbprint,false).Count>0) return true; } }catch{} } return false; }
+  // Cache root-store thumbprints: the live lookup loaded the entire root store (~300 certs) for every
+  // cert during JSON serialization. Built lazily, rebuilt on RefreshTrust (which can add WU roots).
+  // Reads run under the ValidateFile lock, so the lazy build is single-threaded.
+  static System.Collections.Generic.HashSet<string> _rootThumbs=null;
+  static System.Collections.Generic.HashSet<string> RootThumbs(){
+    if(_rootThumbs!=null) return _rootThumbs;
+    var s=new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach(var loc in new[]{StoreLocation.LocalMachine,StoreLocation.CurrentUser}){ try{ using(var st=new X509Store(StoreName.Root,loc)){ st.Open(OpenFlags.ReadOnly); foreach(var rc in st.Certificates){ if(rc.Thumbprint!=null) s.Add(rc.Thumbprint); rc.Dispose(); } } }catch{} }
+    _rootThumbs=s; return s;
+  }
+  static bool IsTrustedRoot(X509Certificate2 c){ if(c==null||c.Thumbprint==null) return false; return RootThumbs().Contains(c.Thumbprint); }
   static string UrlArr(System.Collections.Generic.List<string> l){ var b=new StringBuilder("["); for(int i=0;i<l.Count;i++){ if(i>0)b.Append(","); b.Append(J(l[i])); } return b.Append("]").ToString(); }
   static string TbsAlg(X509Certificate2 c, string alg){ byte[] raw=c.RawData; int p=1; int l=raw[p++]; if(l>=0x80){int n=l&0x7F;l=0;for(int i=0;i<n;i++)l=(l<<8)|raw[p++];} int s=p; int q=s+1; int tl=raw[q++]; if(tl>=0x80){int n=tl&0x7F;tl=0;for(int i=0;i<n;i++)tl=(tl<<8)|raw[q++];} int tot=(q-s)+tl; byte[] t=new byte[tot]; Array.Copy(raw,s,t,0,tot); using(var h=HashAlgorithm.Create(alg)) return BitConverter.ToString(h.ComputeHash(t)).Replace("-","").ToLower(); }
   public static string CertJson(X509Certificate2 c){ if(c==null) return "null"; var eku=new System.Collections.Generic.List<string>(); bool cs=false; foreach(var e in c.Extensions){ var k=e as X509EnhancedKeyUsageExtension; if(k!=null){ foreach(var o in k.EnhancedKeyUsages){ eku.Add(o.Value); if(o.Value=="1.3.6.1.5.5.7.3.3") cs=true; } } }
@@ -148,8 +194,13 @@ public class Validator {
     if(r==null) return "{\"hit\":false}"; return "{\"hit\":true,\"matched_on\":"+J(on)+",\"malware\":"+J(r[0])+",\"malware_type\":"+J(r[1])+"}"; }
 
 
+  // Resolve a Windows system helper to its absolute path so process creation never honors an
+  // attacker-planted binary in the CWD/app dir (CWE-426/427) — these run elevated under --refresh
+  // and the service install.
+  static string Sys(string rel){ try{ return System.IO.Path.Combine(Environment.SystemDirectory, rel); }catch{ return rel; } }
+
   static string[] PsStatus(string path){ try{
-    var psi=new System.Diagnostics.ProcessStartInfo("powershell.exe","-NoProfile -ExecutionPolicy Bypass -Command \"$s=Get-AuthenticodeSignature -LiteralPath $env:VAL_PATH; $c=$s.SignerCertificate; [Console]::Out.Write($s.Status.ToString()+'|'+$(if($c){$c.Thumbprint}else{''}))\"");
+    var psi=new System.Diagnostics.ProcessStartInfo(Sys("WindowsPowerShell\\v1.0\\powershell.exe"),"-NoProfile -ExecutionPolicy Bypass -Command \"$s=Get-AuthenticodeSignature -LiteralPath $env:VAL_PATH; $c=$s.SignerCertificate; [Console]::Out.Write($s.Status.ToString()+'|'+$(if($c){$c.Thumbprint}else{''}))\"");
     psi.UseShellExecute=false; psi.RedirectStandardOutput=true; psi.CreateNoWindow=true; psi.EnvironmentVariables["VAL_PATH"]=path;
     using(var p=System.Diagnostics.Process.Start(psi)){ var ot=p.StandardOutput.ReadToEndAsync(); if(!p.WaitForExit(15000)){ try{p.Kill();}catch{} return new[]{"UnknownError",""}; } string o=""; try{ o=ot.Result; }catch{} return o.Split('|'); }
   }catch{ return new[]{"UnknownError",""}; } }
@@ -160,14 +211,15 @@ public class Validator {
   static int RunRc(string exe,string args){ try{ var psi=new System.Diagnostics.ProcessStartInfo(exe,args){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true,CreateNoWindow=true}; using(var p=System.Diagnostics.Process.Start(psi)){ p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd(); p.WaitForExit(90000); return p.ExitCode; } }catch{ return -1; } }
   static string RefreshTrust(){
     var b=new StringBuilder("{");
-    string crl=RunCmd("certutil.exe","-urlcache crl delete");
-    string ocsp=RunCmd("certutil.exe","-urlcache ocsp delete");
+    string crl=RunCmd(Sys("certutil.exe"),"-urlcache crl delete");
+    string ocsp=RunCmd(Sys("certutil.exe"),"-urlcache ocsp delete");
     string tmp=System.IO.Path.GetTempPath()+"wuroots";
     try{ System.IO.Directory.CreateDirectory(tmp); }catch{}
-    string roots=RunCmd("certutil.exe","-f -syncWithWU \""+tmp+"\"");
+    string roots=RunCmd(Sys("certutil.exe"),"-f -syncWithWU \""+tmp+"\"");
+    _rootThumbs=null;   // WU sync can add roots -> invalidate the trusted-root thumbprint cache
     string disSst=System.IO.Path.Combine(tmp,"disallowedcert.sst");
     bool disInstalled=false; int disCount=0;
-    try{ if(System.IO.File.Exists(disSst)){ disInstalled = RunRc("certutil.exe","-addstore -f Disallowed \""+disSst+"\"")==0; } using(var ds=new X509Store(StoreName.Disallowed,StoreLocation.LocalMachine)){ ds.Open(OpenFlags.ReadOnly); disCount=ds.Certificates.Count; } }catch{}
+    try{ if(System.IO.File.Exists(disSst)){ disInstalled = RunRc(Sys("certutil.exe"),"-addstore -f Disallowed \""+disSst+"\"")==0; } using(var ds=new X509Store(StoreName.Disallowed,StoreLocation.LocalMachine)){ ds.Open(OpenFlags.ReadOnly); disCount=ds.Certificates.Count; } }catch{}
     b.Append("\"crl_cache_cleared\":").Append(crl.ToLower().Contains("deleted")||crl.ToLower().Contains("command completed")?"true":"false");
     b.Append(",\"ocsp_cache_cleared\":").Append(ocsp.ToLower().Contains("deleted")||ocsp.ToLower().Contains("command completed")?"true":"false");
     b.Append(",\"roots_synced\":").Append(roots.ToLower().Contains("command completed")||roots.ToLower().Contains(".crt")?"true":"false");
@@ -214,19 +266,62 @@ public class Validator {
     if(IntPtr.Size!=8) Console.Error.WriteLine("warning: validator assumes x86_64 P/Invoke layout; pointer size="+IntPtr.Size);
     try{ var _e=Environment.GetEnvironmentVariable("VALIDATOR_MAX_SIZE_MB"); long _m; if(_e!=null&&long.TryParse(_e,out _m)&&_m>0&&_m<=long.MaxValue/(1024L*1024L)) maxBytes=_m*1024L*1024L; }catch{}
     string path=null, gvCsv=null, rev="online", warmDir=null; int iters=1;
-    for(int i=0;i<a.Length;i++){ if(a[i]=="--gv"&&i+1<a.Length){gvCsv=a[++i];} else if(a[i]=="--rev"&&i+1<a.Length){rev=a[++i];} else if(a[i]=="--iters"&&i+1<a.Length){iters=int.Parse(a[++i]);} else if(a[i]=="--refresh"){} else if(a[i]=="--warm-cache"&&i+1<a.Length){warmDir=a[++i];} else if(a[i]=="--max-size"&&i+1<a.Length){ long _mb; if(long.TryParse(a[++i],out _mb)&&_mb>0&&_mb<=long.MaxValue/(1024L*1024L)) maxBytes=_mb*1024L*1024L; } else if(a[i].StartsWith("--")){ Console.Error.WriteLine("warning: unknown flag "+a[i]); } else path=a[i]; }
+    string svMode=null, svBind="127.0.0.1", svToken=null; int svPort=8137; bool svAllowInsecure=false;
+    for(int i=0;i<a.Length;i++){ if(a[i]=="--gv"&&i+1<a.Length){gvCsv=a[++i];} else if(a[i]=="--rev"&&i+1<a.Length){rev=a[++i];} else if(a[i]=="--iters"&&i+1<a.Length){iters=int.Parse(a[++i]);} else if(a[i]=="--refresh"){} else if(a[i]=="--warm-cache"&&i+1<a.Length){warmDir=a[++i];} else if(a[i]=="--max-size"&&i+1<a.Length){ long _mb; if(long.TryParse(a[++i],out _mb)&&_mb>0&&_mb<=long.MaxValue/(1024L*1024L)) maxBytes=_mb*1024L*1024L; } else if(a[i]=="--serve"){} else if(a[i]=="--scripts"&&i+1<a.Length){i++;} else if(a[i]=="--serve-http"){svMode="serve-http";} else if(a[i]=="--service"){svMode="service";} else if(a[i]=="--install-service"){svMode="install";} else if(a[i]=="--uninstall-service"){svMode="uninstall";} else if(a[i]=="--bind"&&i+1<a.Length){svBind=a[++i];} else if(a[i]=="--port"&&i+1<a.Length){ int _pp; if(int.TryParse(a[i+1],out _pp)&&_pp>0&&_pp<=65535) svPort=_pp; else Console.Error.WriteLine("warning: invalid --port \""+a[i+1]+"\", using "+svPort); i++; } else if(a[i]=="--token"&&i+1<a.Length){svToken=a[++i];} else if(a[i]=="--allow-insecure"){svAllowInsecure=true;} else if(a[i].StartsWith("--")){ Console.Error.WriteLine("warning: unknown flag "+a[i]); } else path=a[i]; }
     if(rev!="online"&&rev!="offline"&&rev!="none"){ Console.Error.WriteLine("warning: invalid --rev \""+rev+"\", using online"); rev="online"; }
     string scriptMode="ps"; for(int i=0;i<a.Length;i++){ if(a[i]=="--scripts"&&i+1<a.Length) scriptMode=a[i+1]; }
     bool refresh=false; foreach(var x in a) if(x=="--refresh") refresh=true;
     if(refresh){ string rr=RefreshTrust(); if(path==null){ Console.WriteLine(rr); return; } Console.Error.WriteLine("refresh: "+rr); }
     if(gvCsv!=null) LoadGraveyard(gvCsv);
     if(warmDir!=null){ Console.WriteLine(WarmCache(warmDir)); return; }
-    if(path!=null && path.StartsWith("\\\\.\\")){ Console.WriteLine(ErrJson(null,"UnknownError","device path rejected")); return; }
-    if(path!=null){ try{ if(new FileInfo(path).Length > maxBytes){ Console.WriteLine(ErrJson(null,"UnknownError","file too large")); return; } }catch{} }
-    if(path!=null && path.ToLower().EndsWith(".rdp")){ try{ Console.WriteLine(RdpVal.Validate(path, rev)); }catch(OutOfMemoryException){ throw; }catch(Exception _rex){ try{Console.Error.WriteLine(_rex.ToString());}catch{} Console.WriteLine(ErrJson(null,"UnknownError",_rex.GetType().Name)); } return; }
-    var sw=new Stopwatch();
-    for(int it=0;it<iters;it++){ sw.Restart();
-      embeddedCerts=null;
+    // Serve/service modes are mutually exclusive (last one on the argv wins, captured as svMode
+    // in the single parse pass above). --bind/--port/--token/--allow-insecure are parsed there too.
+    if(svMode!=null){
+      // An empty/whitespace --token must be treated as NO token, not an enabled (trivially-guessable)
+      // secret: otherwise `--token ""` would pass the non-loopback bind guard (Token!=null) yet accept
+      // an empty bearer, exposing /validate unauthenticated.
+      ServeOpts o=new ServeOpts(); o.Bind=svBind; o.Port=svPort; o.Token=(svToken!=null&&svToken.Trim().Length>0)?svToken:null; o.AllowInsecure=svAllowInsecure; o.Rev=rev; o.Scripts=scriptMode;
+      if(svMode=="install"){ Environment.Exit(InstallService(o)); }
+      if(svMode=="uninstall"){ Environment.Exit(UninstallService(o)); }
+      if(svMode=="service"){ RunService(o); return; }
+      Environment.Exit(ServeHttp(o));
+    }
+    bool serve=false; foreach(var x in a) if(x=="--serve") serve=true;
+    if(serve){
+      // Persistent warm-server: one file path per stdin line -> one JSON line, until EOF/"quit".
+      // Keeps the CLR + trust caches hot across files (no per-request process fork). The host agent
+      // restarts this process if it ever dies, so one malformed-input crash can't wedge the worker.
+      string line;
+      while((line=Console.In.ReadLine())!=null){ line=line.Trim(); if(line.Length==0) continue; if(line=="quit") break;
+        string outp; try{ outp=ValidateFile(line, rev, scriptMode); }catch(OutOfMemoryException){ throw; }catch(Exception _e){ try{Console.Error.WriteLine(_e.ToString());}catch{} outp=ErrJson(null,"UnknownError",_e.GetType().Name); }
+        Console.WriteLine(outp); Console.Out.Flush();
+      }
+      return;
+    }
+    if(path==null) return;
+    for(int it=0;it<iters;it++) Console.WriteLine(ValidateFile(path, rev, scriptMode));
+  }
+
+  // Serialize validation: ValidateFileLocked mutates process-global static state (embeddedCerts at
+  // :257/262 + VerifyScript, the graveyard/CDP caches) and drives the WinVerifyTrust / X509Chain
+  // engines, so concurrent callers would race and cross-contaminate verdicts. The HTTP server
+  // (--serve-http) dispatches requests on a threadpool; one-shot and stdin --serve are sequential.
+  // A worker handles one sample at a time, so taking a lock here costs nothing and keeps verdicts
+  // byte-identical across all entry points.
+  static readonly object _valLock = new object();
+
+  // Validate one file, return the JSON verdict string (no console output) — shared by one-shot + --serve + HTTP.
+  static string ValidateFile(string path, string rev, string scriptMode){
+    lock(_valLock){ return ValidateFileLocked(path, rev, scriptMode); }
+  }
+
+  static string ValidateFileLocked(string path, string rev, string scriptMode){
+    if(string.IsNullOrWhiteSpace(path)) return ErrJson(null,"UnknownError","empty path");
+    if(path.StartsWith("\\\\.\\")) return ErrJson(null,"UnknownError","device path rejected");
+    try{ if(new FileInfo(path).Length > maxBytes) return ErrJson(null,"UnknownError","file too large"); }catch{}
+    if(path!=null && path.ToLower().EndsWith(".rdp")){ try{ return RdpVal.Validate(path, rev); }catch(OutOfMemoryException){ throw; }catch(Exception _rex){ try{Console.Error.WriteLine(_rex.ToString());}catch{} return ErrJson(null,"UnknownError",_rex.GetType().Name); } }
+    var sw=Stopwatch.StartNew();
+    embeddedCerts=null;
       string sha=null; try{ sha=Sha(path); }catch{}
       try{
       X509Certificate2 signer=null, tsa=null; DateTime? signTime=null; string sigType="None"; string status; string psThumb=null; string diag=null; bool stVerified=false;
@@ -246,21 +341,20 @@ public class Validator {
         stVerified = (sigType=="Script") ? TsaTrusted(tsa, embeddedCerts) : (tsa!=null); try{ ch.ChainPolicy.VerificationTime = (signTime.HasValue && (sigType!="Script" || stVerified)) ? signTime.Value : (tsa!=null ? signer.NotBefore.AddMinutes(1) : DateTime.Now); }catch{}
         bool ok=ch.Build(signer); bool revoked=false,untrusted=false,nottime=false,revunk=false,distrusted=false;
         foreach(var s2 in ch.ChainStatus){ var f=s2.Status; if(f==X509ChainStatusFlags.Revoked)revoked=true; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)untrusted=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)nottime=true; if((f&(X509ChainStatusFlags.RevocationStatusUnknown|X509ChainStatusFlags.OfflineRevocation))!=0)revunk=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)distrusted=true; }
-        if(status=="__chain__"){ status = (!untrusted&&!revoked&&EkuOkForCodeSign(signer))?"Valid":(revoked?"Revoked":"UnknownError"); }
+        if(status=="__chain__"){ status = (!untrusted&&!revoked&&!nottime&&EkuOkForCodeSign(signer))?"Valid":(revoked?"Revoked":(nottime?"Expired":"UnknownError")); }   // native script path must honor NotTimeValid (a timestamped sig still passes: chain is built at signTime)
         else if(sigType=="Script" && status=="Valid" && (untrusted||revoked)){ status = revoked?"Revoked":"UnknownError"; }
         if(revoked && status!="HashMismatch" && status!="NotSigned") status="Revoked";
         if(distrusted && status!="HashMismatch" && status!="NotSigned") status="Distrusted";
         var celems=new System.Collections.Generic.List<string>(); foreach(var el in ch.ChainElements) celems.Add(CertJson(el.Certificate));
-        chainJson="{\"chain_builds\":"+(ok?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(revoked||!revunk?"\"online\"":"\"unknown\"")+",\"valid_at_sign_time\":"+(!untrusted&&!revoked&&!nottime&&!distrusted?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",celems)+"]}"; ch.Dispose();
+        chainJson="{\"chain_builds\":"+(ok?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revunk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"valid_at_sign_time\":"+(!untrusted&&!revoked&&!nottime&&!distrusted?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",celems)+"]}"; ch.Dispose();
       }
       if(status=="__chain__") status="UnknownError";
       if(signer==null && status!="Valid") contentOk=false;
       b.Append(",\"status\":").Append(J(status)).Append(",\"signature_type\":").Append(J(sigType)).Append(",\"content_verified\":").Append(contentOk?"true":"false"); if(diag!=null) b.Append(",\"error\":").Append(J(diag));
       b.Append(",\"is_os_binary\":").Append(IsOS(sigType,signer)?"true":"false"); b.Append(",\"signer\":").Append(CertJson(signer)); b.Append(",\"chain\":").Append(chainJson); b.Append(",\"graveyard\":").Append(GraveyardJson(signer!=null?signer.Thumbprint:psThumb, signer!=null?signer.SerialNumber:null, signer!=null?TbsAlg(signer,"SHA256"):null, sha)); b.Append(",\"timestamped\":").Append(tsa!=null?"true":"false"); b.Append(",\"sign_time\":").Append(signTime.HasValue?J(signTime.Value.ToString("o")):"null"); b.Append(",\"sign_time_verified\":").Append((signTime.HasValue&&stVerified)?"true":"false"); b.Append(",\"timestamper\":").Append(CertJson(tsa));
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
-      Console.WriteLine(b.ToString());
-      if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose();
-      }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} Console.WriteLine(ErrJson(sha,"UnknownError",_ex.GetType().Name)); }
-    }
+      if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); }   // each embedded/CMS cert wraps an unmanaged handle; dispose promptly (long-running serve mode)
+      return b.ToString();
+      }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} return ErrJson(sha,"UnknownError",_ex.GetType().Name); }
   }
 }

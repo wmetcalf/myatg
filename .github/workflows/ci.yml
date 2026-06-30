@@ -15,7 +15,7 @@ jobs:
         shell: cmd
         run: |
           set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
-          "%CSC%" /nologo /r:System.Security.dll /out:myatg.exe myatg.cs rdp_validate.cs
+          "%CSC%" /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:myatg.exe myatg.cs rdp_validate.cs http_serve.cs service.cs
 
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
@@ -24,6 +24,162 @@ jobs:
           if errorlevel 1 ( echo non-zero exit & exit /b 1 )
           type out.json
           findstr /C:"\"file_sha256\"" out.json >NUL || ( echo no JSON emitted & exit /b 1 )
+
+      - name: Smoke — --serve mode (one path per stdin line -> one JSON line)
+        shell: cmd
+        run: |
+          (echo C:\Windows\System32\whoami.exe& echo C:\Windows\System32\xcopy.exe) | myatg.exe --serve > serve.json
+          if errorlevel 1 ( echo non-zero exit & exit /b 1 )
+          type serve.json
+          for /f %%c in ('findstr /C:"\"file_sha256\"" serve.json ^| find /c /v ""') do set N=%%c
+          if not "%N%"=="2" ( echo expected 2 verdict lines, got %N% & exit /b 1 )
+
+      - name: Smoke — --serve-http /healthz
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8137' -PassThru
+          Start-Sleep -Seconds 2
+          try {
+            $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8137/healthz' -TimeoutSec 5
+            if (-not $r.ok) { Write-Error 'healthz not ok'; exit 1 }
+            Write-Host 'healthz ok'
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+
+      - name: Smoke — POST /validate matches one-shot verdict
+        shell: pwsh
+        run: |
+          .\myatg.exe C:\Windows\System32\whoami.exe > oneshot.json
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8138' -PassThru
+          Start-Sleep -Seconds 2
+          try {
+            $bytes = [System.IO.File]::ReadAllBytes('C:\Windows\System32\whoami.exe')
+            $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8138/validate?name=whoami.exe' -Method Post -Body $bytes -ContentType 'application/octet-stream' -TimeoutSec 30
+            $http = ($r.Content | ConvertFrom-Json)
+            $one  = (Get-Content oneshot.json -Raw | ConvertFrom-Json)
+            if ($http.file_sha256 -ne $one.file_sha256) { Write-Error 'sha mismatch'; exit 1 }
+            if ($http.status -ne $one.status) { Write-Error 'status mismatch'; exit 1 }
+            Write-Host ('validate ok: ' + $http.status)
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+
+      - name: Smoke — 8 concurrent /validate requests
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8139' -PassThru
+          Start-Sleep -Seconds 2
+          try {
+            $bytes = [System.IO.File]::ReadAllBytes('C:\Windows\System32\whoami.exe')
+            $jobs = 1..8 | ForEach-Object {
+              Start-Job -ScriptBlock {
+                param($b)
+                (Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8139/validate' -Method Post -Body $b -TimeoutSec 30).StatusCode
+              } -ArgumentList (,$bytes)
+            }
+            $codes = $jobs | Wait-Job | Receive-Job
+            $jobs | Remove-Job
+            if (($codes | Where-Object { $_ -ne 200 }).Count -gt 0) { Write-Error ('non-200: ' + ($codes -join ',')); exit 1 }
+            Write-Host 'concurrency ok'
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+
+      - name: Smoke — /validate error codes
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8140','--max-size','1' -PassThru
+          Start-Sleep -Seconds 2
+          function Code($sb){ try { & $sb | Out-Null; return 0 } catch { return [int]$_.Exception.Response.StatusCode } }
+          try {
+            $wrongMethod = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8140/validate' -Method Get -TimeoutSec 10 }
+            if ($wrongMethod -ne 405) { Write-Error "method: $wrongMethod"; exit 1 }
+            $notFound = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8140/nope' -Method Post -Body 'x' -TimeoutSec 10 }
+            if ($notFound -ne 404) { Write-Error "route: $notFound"; exit 1 }
+            $empty = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8140/validate' -Method Post -Body ([byte[]]@()) -TimeoutSec 10 }
+            if ($empty -ne 400) { Write-Error "empty: $empty"; exit 1 }
+            $big = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8140/validate' -Method Post -Body (New-Object byte[] (2*1024*1024)) -TimeoutSec 30 }
+            if ($big -ne 413) { Write-Error "oversize: $big"; exit 1 }
+            Write-Host 'error codes ok'
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+
+      - name: Smoke — token auth + fail-closed bind
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--port','8141','--token','s3cret' -PassThru
+          Start-Sleep -Seconds 2
+          function Code($sb){ try { & $sb | Out-Null; return 0 } catch { return [int]$_.Exception.Response.StatusCode } }
+          try {
+            $bytes = [System.IO.File]::ReadAllBytes('C:\Windows\System32\whoami.exe')
+            $noTok = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -TimeoutSec 30 }
+            if ($noTok -ne 401) { Write-Error "missing token: $noTok"; exit 1 }
+            $badTok = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -Headers @{Authorization='Bearer nope'} -TimeoutSec 30 }
+            if ($badTok -ne 401) { Write-Error "bad token: $badTok"; exit 1 }
+            $emptyTok = Code { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -Headers @{Authorization='Bearer '} -TimeoutSec 30 }
+            if ($emptyTok -ne 401) { Write-Error "empty bearer: $emptyTok (regression: must 401, not 500)"; exit 1 }
+            $ok = (Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8141/validate' -Method Post -Body $bytes -Headers @{Authorization='Bearer s3cret'} -TimeoutSec 30).StatusCode
+            if ($ok -ne 200) { Write-Error "good token: $ok"; exit 1 }
+            Write-Host 'token auth ok'
+          } finally {
+            Stop-Process -Id $p.Id -Force
+          }
+          # fail-closed: non-loopback bind without token must exit non-zero and not listen
+          $q = Start-Process -FilePath .\myatg.exe -ArgumentList '--serve-http','--bind','0.0.0.0','--port','8142' -Wait -PassThru
+          if ($q.ExitCode -eq 0) { Write-Error 'expected non-zero exit for insecure bind'; exit 1 }
+          Write-Host 'fail-closed ok'
+
+      - name: Smoke — install service, healthz, uninstall
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path .\myatg.exe).Path
+          & $exe --install-service --port 8143
+          if ($LASTEXITCODE -ne 0) { Write-Error "install rc=$LASTEXITCODE"; exit 1 }
+          Start-Sleep -Seconds 3
+          $svc = Get-Service myatg
+          if ($svc.Status -ne 'Running') { Write-Error "service status: $($svc.Status)"; exit 1 }
+          $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8143/healthz' -TimeoutSec 10
+          if (-not $r.ok) { Write-Error 'service healthz not ok'; exit 1 }
+          Write-Host 'service running + healthz ok'
+          & $exe --uninstall-service --port 8143
+          if ($LASTEXITCODE -ne 0) { Write-Error "uninstall rc=$LASTEXITCODE"; exit 1 }
+          Start-Sleep -Seconds 2
+          if (Get-Service myatg -ErrorAction SilentlyContinue) { Write-Error 'service still present'; exit 1 }
+          Write-Host 'uninstall ok'
+
+      - name: Smoke — oversized-TLV script signature does not amplify memory
+        shell: pwsh
+        run: |
+          # Craft a valid SignedCms whose ContentInfo.Content (opaque to SignedCms.Decode) has an inner
+          # TLV declaring a ~2GB length. A regressed DER walker would `new byte[~2GB]` from it; the
+          # bounds-checked one rejects it. Verdict is identical either way (UnknownError), so this test
+          # asserts on the committed memory the bad path leaks.
+          Add-Type -AssemblyName System.Security
+          $rsa=[System.Security.Cryptography.RSA]::Create(2048)
+          $req=New-Object System.Security.Cryptography.X509Certificates.CertificateRequest('CN=evil',$rsa,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+          $oc=New-Object System.Security.Cryptography.OidCollection; [void]$oc.Add((New-Object System.Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))
+          $req.CertificateExtensions.Add((New-Object System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($oc,$false)))
+          $cert=$req.CreateSelfSigned([DateTimeOffset]::Now.AddDays(-1),[DateTimeOffset]::Now.AddDays(365))
+          $evil=[byte[]]@(0x30,0x14,0x30,0x12,0x06,0x0A,0x2B,0x06,0x01,0x04,0x01,0x82,0x37,0x02,0x01,0x04,0x04,0x84,0x7F,0x00,0x00,0x00)
+          $ci=New-Object System.Security.Cryptography.Pkcs.ContentInfo((New-Object System.Security.Cryptography.Oid('1.3.6.1.4.1.311.2.1.4')),$evil)
+          $cms=New-Object System.Security.Cryptography.Pkcs.SignedCms($ci,$false)
+          $cms.ComputeSignature((New-Object System.Security.Cryptography.Pkcs.CmsSigner($cert)))
+          $b64=[Convert]::ToBase64String($cms.Encode())
+          $txt="Write-Host hi`r`n# SIG # Begin signature block`r`n"
+          for($i=0;$i -lt $b64.Length;$i+=64){ $txt+='# SIG # '+$b64.Substring($i,[Math]::Min(64,$b64.Length-$i))+"`r`n" }
+          $txt+="# SIG # End signature block`r`n"
+          [IO.File]::WriteAllText("$PWD\evil.ps1",$txt)
+          $psi=New-Object Diagnostics.ProcessStartInfo; $psi.FileName="$PWD\myatg.exe"; $psi.Arguments='--scripts native "'+"$PWD\evil.ps1"+'"'; $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true
+          $p=[Diagnostics.Process]::Start($psi); $max=0
+          while(-not $p.HasExited){ try{$p.Refresh(); if($p.PrivateMemorySize64 -gt $max){$max=$p.PrivateMemorySize64}}catch{}; Start-Sleep -Milliseconds 10 }
+          $out=$p.StandardOutput.ReadToEnd(); $mb=[math]::Round($max/1MB)
+          Write-Host ("peak commit MB=$mb status=" + ($out | ConvertFrom-Json).status)
+          if ($p.ExitCode -ne 0) { Write-Error "process crashed (exit $($p.ExitCode))"; exit 1 }
+          if (-not ($out | ConvertFrom-Json).status) { Write-Error 'no verdict JSON'; exit 1 }
+          if ($mb -gt 300) { Write-Error "oversized DER length amplified commit to ${mb} MB - TLV/Sub bounds check regressed"; exit 1 }
+          Write-Host 'tlv-bounds ok'
 
       - name: Upload myatg.exe
         uses: actions/upload-artifact@v4

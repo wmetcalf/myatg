@@ -12,6 +12,10 @@ public class RdpVal {
   static string J(string s){ if(s==null)return "null"; var b=new StringBuilder("\""); foreach(char c in s){ if(c=='\\')b.Append("\\\\"); else if(c=='"')b.Append("\\\""); else if(c<0x20||c>0x7E)b.Append("\\u").Append(((int)c).ToString("x4")); else b.Append(c);} b.Append("\""); return b.ToString(); }
   public static string Validate(string path, string rev){
     X509RevocationMode rm = rev=="offline"?X509RevocationMode.Offline : rev=="none"?X509RevocationMode.NoCheck : X509RevocationMode.Online;
+    // Format-specific cap well below the generic maxBytes: real .rdp files are a few KB, so an
+    // 8 MB ceiling blocks a hostile multi-hundred-MB "RDP" from amplifying memory (whole-file read +
+    // base64 signature decode + pkcs7 buffer) and OOM-crashing the persistent service.
+    try{ if(new FileInfo(path).Length > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"signer\":null,\"chain\":null}"; }catch{}
     string text=File.ReadAllText(path); // auto-detects UTF-16 BOM
     var sigM=Regex.Match(text, @"signature:s:([^\r\n]*)", RegexOptions.IgnoreCase);
     var scopeM=Regex.Match(text, @"signscope:s:([^\r\n]*)", RegexOptions.IgnoreCase);
@@ -43,7 +47,7 @@ public class RdpVal {
       DateTime now=DateTime.UtcNow; bool expired=now>signer.NotAfter.ToUniversalTime(); bool notYet=now<signer.NotBefore.ToUniversalTime();
       bool validAtSign=false; if(signTime.HasValue){ var ch2=new X509Chain(); ch2.ChainPolicy.RevocationMode=rm; ch2.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch2.ChainPolicy.VerificationTime=signTime.Value; ch2.ChainPolicy.ExtraStore.AddRange(cms.Certificates); ch2.Build(signer); bool u2=false,r2=false,t2=false,d2=false; foreach(var st in ch2.ChainStatus){ var f=st.Status; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)u2=true; if(f==X509ChainStatusFlags.Revoked)r2=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)t2=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)d2=true; } validAtSign=!u2&&!r2&&!t2&&!d2; ch2.Dispose(); }
       var elems=new List<string>(); foreach(var el in ch.ChainElements){ elems.Add(Validator.CertJson(el.Certificate)); }
-      chainInfo="{\"signature_valid\":"+(sigOk?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+((revoked||!revUnk)?"\"online\"":"\"unknown\"")+",\"not_before\":"+J(signer.NotBefore.ToUniversalTime().ToString("o"))+",\"not_after\":"+J(signer.NotAfter.ToUniversalTime().ToString("o"))+",\"expired_now\":"+(expired?"true":"false")+",\"not_yet_valid\":"+(notYet?"true":"false")+",\"valid_now\":"+((built&&!revoked&&!notTime&&!untrusted&&!distrusted)?"true":"false")+",\"sign_time\":"+(signTime.HasValue?J(signTime.Value.ToString("o")):"null")+",\"sign_time_verified\":false,\"valid_at_sign_time\":"+(validAtSign?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",elems)+"]}"; ch.Dispose();
+      chainInfo="{\"signature_valid\":"+(sigOk?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revUnk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"not_before\":"+J(signer.NotBefore.ToUniversalTime().ToString("o"))+",\"not_after\":"+J(signer.NotAfter.ToUniversalTime().ToString("o"))+",\"expired_now\":"+(expired?"true":"false")+",\"not_yet_valid\":"+(notYet?"true":"false")+",\"valid_now\":"+((built&&!revoked&&!notTime&&!untrusted&&!distrusted)?"true":"false")+",\"sign_time\":"+(signTime.HasValue?J(signTime.Value.ToString("o")):"null")+",\"sign_time_verified\":false,\"valid_at_sign_time\":"+(validAtSign?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",elems)+"]}"; ch.Dispose();
       status = !sigOk?"HashMismatch":(distrusted?"Distrusted":(revoked?"Revoked":(expired?"Expired":(notYet?"NotYetValid":(untrusted?"UntrustedRoot":((built&&!notTime&&Validator.EkuOkForCodeSign(signer))?"Valid":"UnknownError"))))));
     }catch(Exception e){ status="UnknownError"; try{Console.Error.WriteLine(e.ToString());}catch{} sb.Append(",\"error\":"+J(e.GetType().Name)); }
     sb.Append(",\"status\":"+J(status)+",\"signature_type\":\"RDP\"");
@@ -51,16 +55,24 @@ public class RdpVal {
     sb.Append(",\"chain\":"+chainInfo);
     // signscope coverage: settings present in file but NOT signed
     var signedScope=new HashSet<string>((scopeM.Success?scopeM.Groups[1].Value:"").Split(',').Select(x=>x.Trim().ToLower()));
-    var fileKeys=new List<string>(); var unsignedDanger=new List<string>();
+    // Duplicate keys: signature reconstruction is first-wins, but mstsc.exe parses last-wins, so an
+    // appended duplicate of a *signed* setting can carry a different (unsigned-effective) value that
+    // still passes signature checks. We keep first-wins (it matches the signature) but surface every
+    // duplicated key so a consumer can catch the shadowing — and flag a duplicated DANGEROUS key.
+    var fileKeys=new List<string>(); var unsignedDanger=new List<string>(); var dupKeys=new List<string>();
     foreach(Match m in Regex.Matches(text, @"(?im)^([a-z][a-z0-9 ]*?):[sib]:")){
       string k=m.Groups[1].Value.Trim().ToLower();
       if(k=="signature"||k=="signscope") continue;
-      if(!fileKeys.Contains(k)) fileKeys.Add(k);
+      if(!fileKeys.Contains(k)) fileKeys.Add(k); else if(!dupKeys.Contains(k)) dupKeys.Add(k);
       if(!signedScope.Contains(k) && DANGEROUS.Contains(k) && !unsignedDanger.Contains(k)) unsignedDanger.Add(k);
     }
+    // a duplicated dangerous key is unsigned-effective under last-wins even if its first copy was signed
+    foreach(var dk in dupKeys){ if(DANGEROUS.Contains(dk) && !unsignedDanger.Contains(dk)) unsignedDanger.Add(dk); }
     int unsignedCount=fileKeys.Count(k=>!signedScope.Contains(k));
     sb.Append(",\"signscope_count\":"+signedScope.Count(x=>x.Length>0)+",\"total_settings\":"+fileKeys.Count+",\"unsigned_settings\":"+unsignedCount);
     sb.Append(",\"unsigned_dangerous\":["+string.Join(",",unsignedDanger.Select(J))+"]");
+    sb.Append(",\"duplicate_settings\":["+string.Join(",",dupKeys.Select(J))+"]");
+    if(signer!=null) signer.Dispose();   // SignerInfos[0].Certificate is a fresh X509Certificate2 wrapping an unmanaged handle; dispose it (mirrors myatg.cs) to avoid handle leaks in --serve
     return sb.Append("}").ToString();
   }
 }

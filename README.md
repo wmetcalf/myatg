@@ -119,6 +119,65 @@ myatg.exe C:\samples\lure.rdp
 | `--warm-cache <dir>` | Pre-warm the CRL/OCSP cache from a representative sample dir |
 | `--iters <N>` | Repeat N times (benchmarking) |
 
+## Serve modes (persistent validator)
+
+For high throughput, run myatg as a **warm, persistent validator** instead of forking a
+process per file — the CLR JIT and the trust/CRL caches stay hot across files. The verdict
+JSON is byte-identical to the one-shot path.
+
+**stdin mode** — one file **path** per line on stdin, one JSON verdict line back:
+
+```sh
+myatg.exe --serve
+```
+
+**HTTP mode** — POST file **bytes** to a loopback endpoint, get the same JSON verdict:
+
+```sh
+myatg.exe --serve-http --port 8137
+```
+
+Endpoints:
+
+- `GET  /healthz`  → `{"ok":true}` (no auth)
+- `POST /validate` → body = raw file bytes; returns the verdict JSON.
+  Pass the original name as **`?name=<file>`** — its **extension** selects the validation
+  path (`.rdp` → RDP validator; the script SIP for `.ps1`/`.vbs`/`.js`/…), so omitting it can
+  change the verdict for scripts and RDP files (they read as unsigned). PE files (`.exe`/`.dll`)
+  are content-routed, so the name is irrelevant there. Optional query overrides:
+  `?rev=online|offline|none`, `?scripts=ps|native`.
+
+```sh
+curl --data-binary @sample.vbs "http://127.0.0.1:8137/validate?name=sample.vbs"
+```
+
+**Serve flags:** `--bind <addr>` (default `127.0.0.1`), `--port <n>` (default `8137`),
+`--token <secret>` (require `Authorization: Bearer <secret>`), `--allow-insecure` (permit a
+non-loopback bind without a token — not recommended). **Binding a non-loopback address
+without `--token` refuses to start.** `--gv` / `--max-size` / `--rev` / `--scripts` are read
+once at startup and apply to the whole server (`--rev` / `--scripts` can be overridden
+per request via query string).
+
+**As a least-privilege Windows service** (run once, elevated):
+
+```sh
+myatg.exe --install-service --port 8137
+```
+
+Creates service `myatg` under the virtual account `NT SERVICE\myatg`, reserves the loopback
+URL (`netsh http add urlacl`) scoped to that account, and sets auto-start + restart-on-failure.
+The service itself then runs unelevated. Remove it with:
+
+> **Install location:** because the service runs as `NT SERVICE\myatg`, install `myatg.exe` from a
+> path that virtual account can read+execute — a system directory such as `C:\Program Files\myatg\`.
+> Installing from a per-user folder (`Downloads`, `Desktop`) makes the service fail to start with
+> *Access Denied*, since the virtual account has no rights there.
+
+
+```sh
+myatg.exe --uninstall-service --port 8137
+```
+
 ## Output (JSON)
 
 Always emits the same field set (error/oversize cases too, with null/empty values):
