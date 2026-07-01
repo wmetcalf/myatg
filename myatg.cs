@@ -102,7 +102,7 @@ public partial class Validator {
     if(l<0||l>b.Length) throw new Exception("der: content length out of range");
     hl=p-o; ln=l; return tag; }
   static byte[] Sub(byte[] b,int o,int l){ if(b==null||o<0||l<0||o>b.Length||l>b.Length-o) throw new Exception("der: sub-range out of bounds"); var r=new byte[l]; Array.Copy(b,o,r,0,l); return r; }
-  static string Oid(byte[] b){ var s=new StringBuilder(); s.Append(b[0]/40).Append('.').Append(b[0]%40); long v=0; for(int i=1;i<b.Length;i++){v=(v<<7)|(uint)(b[i]&0x7F); if((b[i]&0x80)==0){s.Append('.').Append(v);v=0;}} return s.ToString(); }
+  static string Oid(byte[] b){ if(b==null||b.Length==0) return ""; var s=new StringBuilder(); s.Append(b[0]/40).Append('.').Append(b[0]%40); long v=0; for(int i=1;i<b.Length;i++){v=(v<<7)|(uint)(b[i]&0x7F); if((b[i]&0x80)==0){s.Append('.').Append(v);v=0;}} return s.ToString(); }
   static byte[] ScriptPkcs7(string path){
     try{ if(new FileInfo(path).Length > maxBytes) return null; }catch{ return null; }
     // Detect the BOM (UTF-16LE/BE, UTF-8 — normal for signed .ps1) and decode with it;
@@ -323,8 +323,9 @@ public partial class Validator {
     var sw=Stopwatch.StartNew();
     embeddedCerts=null;
       string sha=null; try{ sha=Sha(path); }catch{}
+      X509Certificate2 signer=null, tsa=null;   // declared out of the try so the finally can dispose them on ANY path
       try{
-      X509Certificate2 signer=null, tsa=null; DateTime? signTime=null; string sigType="None"; string status; string psThumb=null; string diag=null; bool stVerified=false;
+      DateTime? signTime=null; string sigType="None"; string status; string psThumb=null; string diag=null; bool stVerified=false;
       int res=VerifyBinary(path,out signer,out sigType,out tsa,out signTime);
       if(signer!=null) embeddedCerts=PeEmbeddedCerts(path);
       bool contentOk=true;
@@ -353,8 +354,8 @@ public partial class Validator {
       b.Append(",\"status\":").Append(J(status)).Append(",\"signature_type\":").Append(J(sigType)).Append(",\"content_verified\":").Append(contentOk?"true":"false"); if(diag!=null) b.Append(",\"error\":").Append(J(diag));
       b.Append(",\"is_os_binary\":").Append(IsOS(sigType,signer)?"true":"false"); b.Append(",\"signer\":").Append(CertJson(signer)); b.Append(",\"chain\":").Append(chainJson); b.Append(",\"graveyard\":").Append(GraveyardJson(signer!=null?signer.Thumbprint:psThumb, signer!=null?signer.SerialNumber:null, signer!=null?TbsAlg(signer,"SHA256"):null, sha)); b.Append(",\"timestamped\":").Append(tsa!=null?"true":"false"); b.Append(",\"sign_time\":").Append(signTime.HasValue?J(signTime.Value.ToString("o")):"null"); b.Append(",\"sign_time_verified\":").Append((signTime.HasValue&&stVerified)?"true":"false"); b.Append(",\"timestamper\":").Append(CertJson(tsa));
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
-      if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); }   // each embedded/CMS cert wraps an unmanaged handle; dispose promptly (long-running serve mode)
       return b.ToString();
       }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} return ErrJson(sha,"UnknownError",_ex.GetType().Name); }
+      finally{ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); } }   // exception-safe: dispose unmanaged cert handles on every path (a chain-build throw no longer leaks them)
   }
 }
