@@ -353,7 +353,15 @@ public partial class Validator {
           if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); contentOk=(status!="HashMismatch"); if(status=="NotSigned"){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); signer=null; tsa=null; sigType="None"; } }
           else { if(!sigOk||!contentOk) status="HashMismatch"; else status="__chain__"; } }
         else { if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else status="NotSigned"; }
-      } else { status=MapBin(res); if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
+      } else { status=MapBin(res);
+        // content_verified answers "was the signed digest checked against the bytes on disk, and did
+        // it match" -- not "is this trusted". WinVerifyTrust checked the digest on every outcome here
+        // except a mismatch (checked, failed) and an unrecognised error (we cannot claim to know), so
+        // those are the only false cases: Revoked/UntrustedRoot are trust failures over a GOOD digest.
+        // Without this the initial `true` above survived, so a tampered signed binary reported
+        // status=HashMismatch alongside content_verified=true.
+        contentOk = (status!="HashMismatch" && status!="UnknownError" && status!="NotSigned");
+        if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
       var b=new StringBuilder(); b.Append("{\"file_sha256\":").Append(J(sha));
       string chainJson="null";
       if(signer!=null){

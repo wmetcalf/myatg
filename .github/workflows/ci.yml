@@ -25,6 +25,28 @@ jobs:
           oid_vectors.exe
           if errorlevel 1 ( echo OID vector test failed & exit /b 1 )
 
+      - name: Smoke — content_verified tracks the digest, not the initial value
+        shell: pwsh
+        run: |
+          # A tampered signed script must report content_verified:false. It used to report true:
+          # contentOk was initialised true and only reassigned on the TRUST_E_NOSIGNATURE branch,
+          # so the embedded path returned the constant. Verified on real Windows before/after.
+          $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-cv -CertStoreLocation Cert:\CurrentUser\My
+          Set-Content good.ps1 "Write-Host hello" -Encoding UTF8
+          $null = Set-AuthenticodeSignature -FilePath good.ps1 -Certificate $c
+          $t = (Get-Content good.ps1 -Raw) -replace "Write-Host hello","Write-Host hellO"
+          Set-Content bad.ps1 -Value $t -NoNewline -Encoding UTF8
+          $g = .\myatg.exe --rev none good.ps1 | ConvertFrom-Json
+          $b = .\myatg.exe --rev none bad.ps1  | ConvertFrom-Json
+          Write-Host "good: status=$($g.status) content_verified=$($g.content_verified)"
+          Write-Host "bad : status=$($b.status) content_verified=$($b.content_verified)"
+          # tampered: digest genuinely failed -> must be false
+          if ($b.status -ne "HashMismatch") { Write-Error "expected HashMismatch, got $($b.status)"; exit 1 }
+          if ($b.content_verified -ne $false) { Write-Error "tampered file reported content_verified=$($b.content_verified)"; exit 1 }
+          # untrusted signer but INTACT digest -> must stay true (guards against over-correcting)
+          if ($g.status -ne "UntrustedRoot") { Write-Error "expected UntrustedRoot, got $($g.status)"; exit 1 }
+          if ($g.content_verified -ne $true) { Write-Error "intact file reported content_verified=$($g.content_verified)"; exit 1 }
+
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
         run: |
