@@ -17,6 +17,14 @@ jobs:
           set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
           "%CSC%" /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:myatg.exe myatg.cs rdp_validate.cs http_serve.cs service.cs
 
+      - name: Unit — DER OID decoder vectors (X.690 8.19)
+        shell: cmd
+        run: |
+          set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
+          "%CSC%" /nologo /out:oid_vectors.exe tests\oid_vectors.cs
+          oid_vectors.exe
+          if errorlevel 1 ( echo OID vector test failed & exit /b 1 )
+
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
         run: |

@@ -102,7 +102,26 @@ public partial class Validator {
     if(l<0||l>b.Length) throw new Exception("der: content length out of range");
     hl=p-o; ln=l; return tag; }
   static byte[] Sub(byte[] b,int o,int l){ if(b==null||o<0||l<0||o>b.Length||l>b.Length-o) throw new Exception("der: sub-range out of bounds"); var r=new byte[l]; Array.Copy(b,o,r,0,l); return r; }
-  static string Oid(byte[] b){ if(b==null||b.Length==0) return ""; var s=new StringBuilder(); s.Append(b[0]/40).Append('.').Append(b[0]%40); long v=0; for(int i=1;i<b.Length;i++){v=(v<<7)|(uint)(b[i]&0x7F); if((b[i]&0x80)==0){s.Append('.').Append(v);v=0;}} return s.ToString(); }
+  // X.690 8.19: EVERY subidentifier is a base-128 varint, including the first, which encodes
+  // 40*X+Y and spans multiple bytes once it exceeds 127 -- so the first arc cannot be read out of
+  // b[0] alone. Malformed input throws (same idiom as TLV/Sub above) rather than returning a
+  // plausible string: a value with no valid DER preimage must never reach an OID equality test
+  // or get marshalled into the native SIP.
+  static string Oid(byte[] b){
+    if(b==null||b.Length==0) throw new Exception("der: empty OID");
+    var vals=new System.Collections.Generic.List<long>(); long v=0; int len=0;
+    for(int i=0;i<b.Length;i++){
+      if(len==0&&b[i]==0x80) throw new Exception("der: non-minimal OID subidentifier");
+      if(len>=9) throw new Exception("der: OID subidentifier too large");   // 9*7=63 bits, fits long unsigned-positive
+      v=(v<<7)|(uint)(b[i]&0x7F); len++;
+      if((b[i]&0x80)==0){ vals.Add(v); v=0; len=0; }
+    }
+    if(len!=0) throw new Exception("der: truncated OID subidentifier");
+    long f=vals[0]; long x=f<40?0:(f<80?1:2);
+    var s=new StringBuilder(); s.Append(x).Append('.').Append(f-40*x);
+    for(int i=1;i<vals.Count;i++) s.Append('.').Append(vals[i]);
+    return s.ToString();
+  }
   static byte[] ScriptPkcs7(string path){
     try{ if(new FileInfo(path).Length > maxBytes) return null; }catch{ return null; }
     // Detect the BOM (UTF-16LE/BE, UTF-8 — normal for signed .ps1) and decode with it;
@@ -157,7 +176,7 @@ public partial class Validator {
   static void CollectUris(byte[] b, int o, int end, System.Collections.Generic.List<string> outv, int depth){ if(depth>24) return; int p=o; while(p+1<end){ int hl,ln,tag; try{ tag=TLV(b,p,out hl,out ln); }catch{ break; } int cs=p+hl; if(ln<0||cs+ln>end) break; if(tag==0x86){ string u=Encoding.ASCII.GetString(b,cs,ln).Trim(); if(u.Length>0&&!outv.Contains(u))outv.Add(u); } else if((tag&0x20)!=0){ CollectUris(b,cs,cs+ln,outv,depth+1); } p=cs+ln; } }
   static System.Collections.Generic.List<string> CdpUrls(X509Certificate2 c){ var r=new System.Collections.Generic.List<string>(); foreach(var ext in c.Extensions){ if(ext.Oid.Value=="2.5.29.31"){ try{ CollectUris(ext.RawData,0,ext.RawData.Length,r,0); }catch{} } } return r; }
   // AIA = SEQUENCE OF AccessDescription{ accessMethod OID, accessLocation GeneralName }; split caIssuers (..48.2) vs OCSP (..48.1)
-  static void AiaUrls(X509Certificate2 c, System.Collections.Generic.List<string> ca, System.Collections.Generic.List<string> ocsp){ foreach(var ext in c.Extensions){ if(ext.Oid.Value!="1.3.6.1.5.5.7.1.1") continue; try{ byte[] raw=ext.RawData; int hl,ln; if(TLV(raw,0,out hl,out ln)!=0x30) continue; int p=hl,end=hl+ln; while(p+1<end){ int h2,l2; int t2=TLV(raw,p,out h2,out l2); int cs=p+h2; if(l2<0||cs+l2>end) break; if(t2==0x30){ int ip=cs,iend=cs+l2; string method=null,uri=null; while(ip+1<iend){ int h3,l3; int t3=TLV(raw,ip,out h3,out l3); int ccs=ip+h3; if(l3<0||ccs+l3>iend) break; if(t3==0x06) method=Oid(Sub(raw,ccs,l3)); else if(t3==0x86) uri=Encoding.ASCII.GetString(raw,ccs,l3).Trim(); ip=ccs+l3; } if(uri!=null&&uri.Length>0){ if(method=="1.3.6.1.5.5.7.48.2"){ if(!ca.Contains(uri))ca.Add(uri); } else if(method=="1.3.6.1.5.5.7.48.1"){ if(!ocsp.Contains(uri))ocsp.Add(uri); } } } p=cs+l2; } }catch{} } }
+  static void AiaUrls(X509Certificate2 c, System.Collections.Generic.List<string> ca, System.Collections.Generic.List<string> ocsp){ foreach(var ext in c.Extensions){ if(ext.Oid.Value!="1.3.6.1.5.5.7.1.1") continue; try{ byte[] raw=ext.RawData; int hl,ln; if(TLV(raw,0,out hl,out ln)!=0x30) continue; int p=hl,end=hl+ln; while(p+1<end){ int h2,l2; int t2=TLV(raw,p,out h2,out l2); int cs=p+h2; if(l2<0||cs+l2>end) break; if(t2==0x30){ int ip=cs,iend=cs+l2; string method=null,uri=null; while(ip+1<iend){ int h3,l3; int t3=TLV(raw,ip,out h3,out l3); int ccs=ip+h3; if(l3<0||ccs+l3>iend) break; if(t3==0x06){ try{ method=Oid(Sub(raw,ccs,l3)); }catch{ method=null; } } else if(t3==0x86) uri=Encoding.ASCII.GetString(raw,ccs,l3).Trim(); ip=ccs+l3; } if(uri!=null&&uri.Length>0){ if(method=="1.3.6.1.5.5.7.48.2"){ if(!ca.Contains(uri))ca.Add(uri); } else if(method=="1.3.6.1.5.5.7.48.1"){ if(!ocsp.Contains(uri))ocsp.Add(uri); } } } p=cs+l2; } }catch{} } }
   static bool SelfIssued(X509Certificate2 c){ byte[] su=c.SubjectName.RawData, iss=c.IssuerName.RawData; if(su.Length!=iss.Length) return false; for(int k=0;k<su.Length;k++) if(su[k]!=iss[k]) return false; return true; }
   // Cache root-store thumbprints: the live lookup loaded the entire root store (~300 certs) for every
   // cert during JSON serialization. Built lazily, rebuilt on RefreshTrust (which can add WU roots).
@@ -235,7 +254,7 @@ public partial class Validator {
   static string WarmCache(string dir){ int n=0,certs=0; var files=Directory.Exists(dir)?Directory.GetFiles(dir):new string[]{dir};
     foreach(var f in files){ try{ X509Certificate2 signer; string st; X509Certificate2 tsa; DateTime? stm; VerifyBinary(f,out signer,out st,out tsa,out stm);
       if(signer==null){ byte[] der=ScriptPkcs7(f); if(der!=null){ try{ var cms=new SignedCms(); cms.Decode(der); signer=cms.SignerInfos[0].Certificate; }catch{} } }
-      if(signer!=null){ var ch=new X509Chain(); ch.ChainPolicy.RevocationMode=X509RevocationMode.Online; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.Build(signer); foreach(var el in ch.ChainElements){ HarvestCDP(el.Certificate); certs++; } ch.Dispose(); n++; }
+      if(signer!=null){ using(var ch=new X509Chain()){ ch.ChainPolicy.RevocationMode=X509RevocationMode.Online; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.Build(signer); foreach(var el in ch.ChainElements){ HarvestCDP(el.Certificate); certs++; } } n++; }
     }catch{} }
     var b=new StringBuilder("{\"warmed_files\":"+n+",\"chain_certs\":"+certs+",\"crl_ocsp_urls_cached\":["); bool fst=true; foreach(var u in harvestedCDP){ if(!fst)b.Append(","); b.Append(J(u)); fst=false; } return b.Append("]}").ToString();
   }
@@ -323,7 +342,7 @@ public partial class Validator {
     var sw=Stopwatch.StartNew();
     embeddedCerts=null;
       string sha=null; try{ sha=Sha(path); }catch{}
-      X509Certificate2 signer=null, tsa=null;   // declared out of the try so the finally can dispose them on ANY path
+      X509Certificate2 signer=null, tsa=null; X509Chain ch=null;   // declared out of the try so the finally can dispose them on ANY path
       try{
       DateTime? signTime=null; string sigType="None"; string status; string psThumb=null; string diag=null; bool stVerified=false;
       int res=VerifyBinary(path,out signer,out sigType,out tsa,out signTime);
@@ -331,14 +350,14 @@ public partial class Validator {
       bool contentOk=true;
       if((uint)res==0x800B0100){ byte[] der=ScriptPkcs7(path);
         if(der!=null){ bool sigOk=VerifyScript(path,der,out signer,out contentOk,out tsa,out signTime); sigType="Script";
-          if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); contentOk=(status!="HashMismatch"); if(status=="NotSigned"){ signer=null; tsa=null; sigType="None"; } }
+          if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); contentOk=(status!="HashMismatch"); if(status=="NotSigned"){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); signer=null; tsa=null; sigType="None"; } }
           else { if(!sigOk||!contentOk) status="HashMismatch"; else status="__chain__"; } }
         else { if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else status="NotSigned"; }
       } else { status=MapBin(res); if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
       var b=new StringBuilder(); b.Append("{\"file_sha256\":").Append(J(sha));
       string chainJson="null";
       if(signer!=null){
-        var ch=new X509Chain(); ch.ChainPolicy.RevocationMode=(rev=="offline"?X509RevocationMode.Offline:rev=="none"?X509RevocationMode.NoCheck:X509RevocationMode.Online); ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); if(embeddedCerts!=null) ch.ChainPolicy.ExtraStore.AddRange(embeddedCerts);
+        ch=new X509Chain(); ch.ChainPolicy.RevocationMode=(rev=="offline"?X509RevocationMode.Offline:rev=="none"?X509RevocationMode.NoCheck:X509RevocationMode.Online); ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); if(embeddedCerts!=null) ch.ChainPolicy.ExtraStore.AddRange(embeddedCerts);
         stVerified = (sigType=="Script") ? TsaTrusted(tsa, embeddedCerts) : (tsa!=null); try{ ch.ChainPolicy.VerificationTime = (signTime.HasValue && (sigType!="Script" || stVerified)) ? signTime.Value : (tsa!=null ? signer.NotBefore.AddMinutes(1) : DateTime.Now); }catch{}
         bool ok=ch.Build(signer); bool revoked=false,untrusted=false,nottime=false,revunk=false,distrusted=false;
         foreach(var s2 in ch.ChainStatus){ var f=s2.Status; if(f==X509ChainStatusFlags.Revoked)revoked=true; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)untrusted=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)nottime=true; if((f&(X509ChainStatusFlags.RevocationStatusUnknown|X509ChainStatusFlags.OfflineRevocation))!=0)revunk=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)distrusted=true; }
@@ -347,7 +366,7 @@ public partial class Validator {
         if(revoked && status!="HashMismatch" && status!="NotSigned") status="Revoked";
         if(distrusted && status!="HashMismatch" && status!="NotSigned") status="Distrusted";
         var celems=new System.Collections.Generic.List<string>(); foreach(var el in ch.ChainElements) celems.Add(CertJson(el.Certificate));
-        chainJson="{\"chain_builds\":"+(ok?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revunk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"valid_at_sign_time\":"+(!untrusted&&!revoked&&!nottime&&!distrusted?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",celems)+"]}"; ch.Dispose();
+        chainJson="{\"chain_builds\":"+(ok?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revunk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"valid_at_sign_time\":"+(!untrusted&&!revoked&&!nottime&&!distrusted?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",celems)+"]}";
       }
       if(status=="__chain__") status="UnknownError";
       if(signer==null && status!="Valid") contentOk=false;
@@ -356,6 +375,6 @@ public partial class Validator {
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
       return b.ToString();
       }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} return ErrJson(sha,"UnknownError",_ex.GetType().Name); }
-      finally{ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); } }   // exception-safe: dispose unmanaged cert handles on every path (a chain-build throw no longer leaks them)
+      finally{ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); } embeddedCerts=null; if(ch!=null)ch.Dispose(); }   // exception-safe: dispose the certs AND the chain on every path, and drop the static so it never roots disposed handles
   }
 }
