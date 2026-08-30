@@ -389,7 +389,10 @@ public partial class Validator {
           // bound to this file, so content_verified cannot stand either -- otherwise this emits
           // status=HashMismatch beside content_verified=true, exactly the contradiction the
           // binary branch was fixed to stop producing.
-          else { if(!sigOk||!contentOk){ status="HashMismatch"; contentOk=false; } else status="__chain__"; } }
+          // Two disjoint causes reach HashMismatch here and, now that contentOk is forced false,
+          // nothing else in the JSON tells them apart -- the binary path always attaches a
+          // wintrust code, this branch attached nothing. Name which one fired.
+          else { if(!sigOk||!contentOk){ status="HashMismatch"; diag=!sigOk?(contentOk?"cms signature invalid; content digest matched":"cms signature invalid; content digest mismatched"):"content digest mismatched; cms signature valid"; contentOk=false; } else status="__chain__"; } }
         else { if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else { status="NotSigned"; contentOk=false; } }
       } else { status=MapBin(res);
         // content_verified answers "was the signed digest checked against the bytes on disk, and did
