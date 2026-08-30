@@ -52,6 +52,20 @@ jobs:
           if ($g.status -ne "UntrustedRoot") { Write-Error "expected UntrustedRoot, got $($g.status)"; exit 1 }
           if ($g.content_verified -ne $true) { Write-Error "intact reported content_verified=$($g.content_verified)"; exit 1 }
 
+          # THE discriminating vector. UntrustedRoot+HashMismatch evaluate the same under the old
+          # MapBin-string form and the new wintrust-code switch, so they cannot catch a revert. An
+          # intact binary with an EXPIRED signer is the case that differs: string form -> UnknownError
+          # -> false; code form -> 0x800B0101 -> true. Short-lived cert, sign while valid, then wait.
+          $se = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-cv-exp -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddSeconds(25)
+          Copy-Item .\myatg.exe .\expired.exe -Force
+          $null = Set-AuthenticodeSignature -FilePath expired.exe -Certificate $se
+          if ((Get-AuthenticodeSignature expired.exe).Status -eq "NotSigned") { Write-Error "fixture never got signed"; exit 1 }
+          Start-Sleep -Seconds 35
+          $e = .\myatg.exe --rev none expired.exe | ConvertFrom-Json
+          Write-Host "expired : type=$($e.signature_type) status=$($e.status) content_verified=$($e.content_verified) err=$($e.error)"
+          if ($e.signature_type -ne "Embedded") { Write-Error "expired fixture took the $($e.signature_type) path"; exit 1 }
+          if ($e.content_verified -ne $true) { Write-Error "intact expired-cert binary reported content_verified=$($e.content_verified) - the digest matched"; exit 1 }
+
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
         run: |
