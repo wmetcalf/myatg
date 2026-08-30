@@ -392,7 +392,14 @@ public partial class Validator {
         // left neighbours like CERT_E_UNTRUSTEDCA/UNTRUSTEDTESTROOT/VALIDITYPERIODNESTING reporting
         // false for intact files. Excluded: 0x800B0100 TRUST_E_NOSIGNATURE (handled above, nothing to
         // compare) and 0x80096010 TRUST_E_BAD_DIGEST (compared, did not match).
-        { uint _u=(uint)res; contentOk = (res==0) || (_u>=0x800B0101 && _u<=0x800B0114); }
+        // Also post-digest, but in the TRUST_E_* 0x80096xxx family rather than the CERT_E_* range:
+        // 0x80096003 COUNTER_SIGNER and 0x80096005 TIME_STAMP are countersignature/timestamp failures,
+        // and 0x80096019 BASIC_CONSTRAINTS is a certificate policy failure -- in all three the primary
+        // object digest was already compared and matched. Deliberately NOT included: 0x80096010
+        // BAD_DIGEST (compared, failed), 0x80096002 NO_SIGNER_CERT and 0x80096004 CERT_SIGNATURE,
+        // where we cannot claim the file digest was reached.
+        { uint _u=(uint)res; contentOk = (res==0) || (_u>=0x800B0101 && _u<=0x800B0114)
+                                       || _u==0x80096003 || _u==0x80096005 || _u==0x80096019; }
         if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
       var b=new StringBuilder(); b.Append("{\"file_sha256\":").Append(J(sha));
       string chainJson="null";
