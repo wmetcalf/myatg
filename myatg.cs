@@ -141,7 +141,7 @@ public partial class Validator {
     if(sb.Length==0) return null;
     try{ return Convert.FromBase64String(sb.ToString()); }catch{ return null; }
   }
-  static bool VerifyScript(string path,byte[] der,out X509Certificate2 signer,out bool contentOk,out X509Certificate2 tsa,out DateTime? signTime,out bool indirectParsed){ indirectParsed=false; tsa=null; signTime=null;
+  static bool VerifyScript(string path,byte[] der,out X509Certificate2 signer,out bool contentOk,out X509Certificate2 tsa,out DateTime? signTime,out bool digestChecked){ digestChecked=false; tsa=null; signTime=null;
     signer=null; contentOk=false; bool sigOk;
     var cms=new SignedCms(); cms.Decode(der); embeddedCerts=cms.Certificates; try{ cms.CheckSignature(true); sigOk=true; }catch{ sigOk=false; }
     signer=cms.SignerInfos[0].Certificate;
@@ -158,8 +158,7 @@ public partial class Validator {
       int hA,lA; TLV(ec,d0,out hA,out lA); dataOid=Oid(Sub(ec,d0+hA,lA)); int vOff=d0+hA+lA; int hV,lV; TLV(ec,vOff,out hV,out lV); dataVal=Sub(ec,vOff,hV+lV);
       int c1=c0+hl0+ln0; int hl1,ln1; TLV(ec,c1,out hl1,out ln1); int m0=c1+hl1; int hAi,lAi; TLV(ec,m0,out hAi,out lAi); int ao=m0+hAi; int hAo,lAo; TLV(ec,ao,out hAo,out lAo); algoOid=Oid(Sub(ec,ao+hAo,lAo));
       int dOff=m0+hAi+lAi; int hD,lD; TLV(ec,dOff,out hD,out lD); digest=Sub(ec,dOff+hD,lD);
-    }catch(OutOfMemoryException){ throw; }catch{ return sigOk; }   // indirectParsed stays false: caller must not read this as a digest mismatch
-    indirectParsed=true;
+    }catch(OutOfMemoryException){ throw; }catch{ return sigOk; }   // digestChecked stays false: caller must not read this as a digest mismatch
     IntPtr pg=IntPtr.Zero, sdig=IntPtr.Zero, hProv=IntPtr.Zero, hFileS=IntPtr.Zero;
     var ind=new IND();
     try{
@@ -170,7 +169,7 @@ public partial class Validator {
         pg=Marshal.AllocHGlobal(16); Marshal.StructureToPtr(sip,pg,false);
         sdig=Marshal.StringToHGlobalAnsi(algoOid);
         var s=new SUBJ(); s.cbSize=(uint)Marshal.SizeOf(typeof(SUBJ)); s.pgType=pg; s.hFile=hFileS; s.file=path; s.enc=0x10001; s.hProv=hProv; s.dig.oid=sdig;
-        contentOk = vf(ref s,ref ind)==0;
+        contentOk = vf(ref s,ref ind)==0; digestChecked=true;
       }
     } finally {
       if(ind.dataOid!=IntPtr.Zero)Marshal.FreeHGlobal(ind.dataOid); if(ind.dataVal.p!=IntPtr.Zero)Marshal.FreeHGlobal(ind.dataVal.p); if(ind.algo.oid!=IntPtr.Zero)Marshal.FreeHGlobal(ind.algo.oid); if(ind.digest.p!=IntPtr.Zero)Marshal.FreeHGlobal(ind.digest.p);
@@ -233,7 +232,7 @@ public partial class Validator {
   static string[] PsStatus(string path){ try{
     var psi=new System.Diagnostics.ProcessStartInfo(Sys("WindowsPowerShell\\v1.0\\powershell.exe"),"-NoProfile -ExecutionPolicy Bypass -Command \"$s=Get-AuthenticodeSignature -LiteralPath $env:VAL_PATH; $c=$s.SignerCertificate; [Console]::Out.Write($s.Status.ToString()+'|'+$(if($c){$c.Thumbprint}else{''}))\"");
     psi.UseShellExecute=false; psi.RedirectStandardOutput=true; psi.CreateNoWindow=true; psi.EnvironmentVariables["VAL_PATH"]=path;
-    using(var p=System.Diagnostics.Process.Start(psi)){ var ot=p.StandardOutput.ReadToEndAsync(); if(!p.WaitForExit(15000)){ try{p.Kill();}catch{} return new[]{"__noanswer__",""}; } string o=""; try{ o=ot.Result; }catch{} return o.Split('|'); }
+    using(var p=System.Diagnostics.Process.Start(psi)){ var ot=p.StandardOutput.ReadToEndAsync(); if(!p.WaitForExit(15000)){ try{p.Kill();}catch{} return new[]{"__noanswer__",""}; } string o=""; try{ o=ot.Result; }catch{} if(string.IsNullOrWhiteSpace(o)) return new[]{"__noanswer__",""}; return o.Split('|'); }
   }catch{ return new[]{"__noanswer__",""}; } }
   static string MapPs(string s){ switch(s){ case "Valid":return "Valid"; case "HashMismatch":return "HashMismatch"; case "NotSigned":return "NotSigned"; case "NotTrusted":return "UntrustedRoot"; case "UnknownError":return "UnknownError"; default:return s; } }
 
@@ -361,19 +360,24 @@ public partial class Validator {
       int res=VerifyBinary(path,out signer,out sigType,out tsa,out signTime);
       if(signer!=null) embeddedCerts=PeEmbeddedCerts(path);
       bool contentOk=true;
-      // Script paths: contentOk is true only where a digest was actually compared. MapPs("UnknownError")
-      // is PsStatus's 15s-timeout/Kill/exception path, not an answer, so it must not read as verified --
-      // and must agree with the binary branch below, which treats UnknownError the same way.
+        // Script paths: PowerShell reports HashMismatch when the digest fails, so any other ANSWER
+        // means it did not find a mismatch. psAns separates a real answer from PsStatus's non-answers
+        // (15s timeout/Kill, exception, empty stdout), which must never read as verified.
+        // Known limit, deliberately accepted: PowerShell's SignatureStatus has no Expired or Revoked
+        // member, so those collapse into UnknownError alongside genuine "could not process" cases.
+        // Treating UnknownError as unverified would flip every expired-signer script to false -- the
+        // regression fixed on the binary side -- so it stays true here. The two branches therefore do
+        // NOT agree on UnknownError and cannot until the status carries the wintrust code.
       if((uint)res==0x800B0100){ byte[] der=ScriptPkcs7(path);
         // VerifyScript reassigns signer/tsa and the embeddedCerts static. The catalog fallback can
         // reach here with all three already populated (anyCat sets signer before returning catRes,
         // which may itself be TRUST_E_NOSIGNATURE), so release them before they are overwritten.
         if(der!=null){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _pc in embeddedCerts) _pc.Dispose(); embeddedCerts=null; }
-          bool indirectParsed; bool sigOk=VerifyScript(path,der,out signer,out contentOk,out tsa,out signTime,out indirectParsed); sigType="Script";
+          bool digestChecked; bool sigOk=VerifyScript(path,der,out signer,out contentOk,out tsa,out signTime,out digestChecked); sigType="Script";
           if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status=="NotSigned"){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); signer=null; tsa=null; sigType="None"; } }
           // "we could not parse SpcIndirectData" is NOT "the digest did not match" -- reporting
           // HashMismatch there would assert tampering the tool never tested for.
-          else if(!indirectParsed){ status="UnknownError"; diag="der: SpcIndirectData unparseable"; }
+          else if(!digestChecked){ status="UnknownError"; diag="script content check did not run (unparseable SpcIndirectData, or no SIP for this subject type)"; }
           else { if(!sigOk||!contentOk) status="HashMismatch"; else status="__chain__"; } }
         else { if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else { status="NotSigned"; contentOk=false; } }
       } else { status=MapBin(res);
@@ -398,7 +402,9 @@ public partial class Validator {
         // object digest was already compared and matched. Deliberately NOT included: 0x80096010
         // BAD_DIGEST (compared, failed), 0x80096002 NO_SIGNER_CERT and 0x80096004 CERT_SIGNATURE,
         // where we cannot claim the file digest was reached.
-        { uint _u=(uint)res; contentOk = (res==0) || (_u>=0x800B0101 && _u<=0x800B0114)
+        // 0x800B010B TRUST_E_FAIL is inside the numeric range but is NOT a certificate-policy
+        // outcome -- it is wintrust's generic failure, carrying no evidence the digest step ran.
+        { uint _u=(uint)res; contentOk = (res==0) || (_u>=0x800B0101 && _u<=0x800B0114 && _u!=0x800B010B)
                                        || _u==0x80096003 || _u==0x80096005 || _u==0x80096019; }
         if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
       var b=new StringBuilder(); b.Append("{\"file_sha256\":").Append(J(sha));
