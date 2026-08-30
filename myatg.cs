@@ -109,17 +109,21 @@ public partial class Validator {
   // or get marshalled into the native SIP.
   static string Oid(byte[] b){
     if(b==null||b.Length==0) throw new Exception("der: empty OID");
-    var vals=new System.Collections.Generic.List<long>(); long v=0; int len=0;
+    // Streams straight into the StringBuilder: buffering the arcs in a List<long> would cost 8 bytes
+    // of heap per input byte, and maxBytes is 500MB with OutOfMemoryException rethrown all the way out
+    // through the HTTP layer -- the same amplification class the oversized-TLV CI test exists to catch.
+    var s=new StringBuilder(); long v=0; int len=0; bool first=true;
     for(int i=0;i<b.Length;i++){
       if(len==0&&b[i]==0x80) throw new Exception("der: non-minimal OID subidentifier");
-      if(len>=9) throw new Exception("der: OID subidentifier too large");   // 9*7=63 bits, fits long unsigned-positive
+      if(len>=9) throw new Exception("der: OID subidentifier too large");   // 9*7=63 bits; admits exactly long.MaxValue
       v=(v<<7)|(uint)(b[i]&0x7F); len++;
-      if((b[i]&0x80)==0){ vals.Add(v); v=0; len=0; }
+      if((b[i]&0x80)==0){
+        if(first){ long x=v<40?0:(v<80?1:2); s.Append(x).Append('.').Append(v-40*x); first=false; }
+        else s.Append('.').Append(v);
+        v=0; len=0;
+      }
     }
     if(len!=0) throw new Exception("der: truncated OID subidentifier");
-    long f=vals[0]; long x=f<40?0:(f<80?1:2);
-    var s=new StringBuilder(); s.Append(x).Append('.').Append(f-40*x);
-    for(int i=1;i<vals.Count;i++) s.Append('.').Append(vals[i]);
     return s.ToString();
   }
   static byte[] ScriptPkcs7(string path){
@@ -144,10 +148,17 @@ public partial class Validator {
     try{ var csi=cms.SignerInfos[0].CounterSignerInfos; if(csi.Count>0){ tsa=csi[0].Certificate; foreach(var at in csi[0].SignedAttributes){ if(at.Oid.Value=="1.2.840.113549.1.9.5"&&at.Values.Count>0){ try{ var t=new Pkcs9SigningTime(at.Values[0].RawData); signTime=t.SigningTime.ToUniversalTime(); }catch{} } } } }catch{}
     if(tsa==null){ try{ foreach(var ua in cms.SignerInfos[0].UnsignedAttributes){ if(ua.Oid.Value=="1.3.6.1.4.1.311.3.3.1"&&ua.Values.Count>0){ var tok=new SignedCms(); tok.Decode(ua.Values[0].RawData); tsa=tok.SignerInfos[0].Certificate; signTime=TstGenTime(tok.ContentInfo.Content); } } }catch{} }
     byte[] ec=cms.ContentInfo.Content;
-    int hl,ln; TLV(ec,0,out hl,out ln); int c0=hl; int hl0,ln0; TLV(ec,c0,out hl0,out ln0); int d0=c0+hl0;
-    int hA,lA; TLV(ec,d0,out hA,out lA); string dataOid=Oid(Sub(ec,d0+hA,lA)); int vOff=d0+hA+lA; int hV,lV; TLV(ec,vOff,out hV,out lV); byte[] dataVal=Sub(ec,vOff,hV+lV);
-    int c1=c0+hl0+ln0; int hl1,ln1; TLV(ec,c1,out hl1,out ln1); int m0=c1+hl1; int hAi,lAi; TLV(ec,m0,out hAi,out lAi); int ao=m0+hAi; int hAo,lAo; TLV(ec,ao,out hAo,out lAo); string algoOid=Oid(Sub(ec,ao+hAo,lAo));
-    int dOff=m0+hAi+lAi; int hD,lD; TLV(ec,dOff,out hD,out lD); byte[] digest=Sub(ec,dOff+hD,lD);
+    string dataOid, algoOid; byte[] dataVal, digest;
+    // SpcIndirectData is attacker-controlled and opaque to SignedCms.Decode (see the comment above).
+    // Oid() throws on malformed DER, and TLV/Sub bound the TLV but not its content bytes -- so one
+    // crafted byte must NOT cost the whole verdict. contentOk is already false here; signer, chain and
+    // the graveyard lookup are legitimately known and stay reported.
+    try{
+      int hl,ln; TLV(ec,0,out hl,out ln); int c0=hl; int hl0,ln0; TLV(ec,c0,out hl0,out ln0); int d0=c0+hl0;
+      int hA,lA; TLV(ec,d0,out hA,out lA); dataOid=Oid(Sub(ec,d0+hA,lA)); int vOff=d0+hA+lA; int hV,lV; TLV(ec,vOff,out hV,out lV); dataVal=Sub(ec,vOff,hV+lV);
+      int c1=c0+hl0+ln0; int hl1,ln1; TLV(ec,c1,out hl1,out ln1); int m0=c1+hl1; int hAi,lAi; TLV(ec,m0,out hAi,out lAi); int ao=m0+hAi; int hAo,lAo; TLV(ec,ao,out hAo,out lAo); algoOid=Oid(Sub(ec,ao+hAo,lAo));
+      int dOff=m0+hAi+lAi; int hD,lD; TLV(ec,dOff,out hD,out lD); digest=Sub(ec,dOff+hD,lD);
+    }catch(OutOfMemoryException){ throw; }catch{ return sigOk; }
     IntPtr pg=IntPtr.Zero, sdig=IntPtr.Zero, hProv=IntPtr.Zero, hFileS=IntPtr.Zero;
     var ind=new IND();
     try{
@@ -255,6 +266,7 @@ public partial class Validator {
     foreach(var f in files){ try{ X509Certificate2 signer; string st; X509Certificate2 tsa; DateTime? stm; VerifyBinary(f,out signer,out st,out tsa,out stm);
       if(signer==null){ byte[] der=ScriptPkcs7(f); if(der!=null){ try{ var cms=new SignedCms(); cms.Decode(der); signer=cms.SignerInfos[0].Certificate; }catch{} } }
       if(signer!=null){ using(var ch=new X509Chain()){ ch.ChainPolicy.RevocationMode=X509RevocationMode.Online; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.Build(signer); foreach(var el in ch.ChainElements){ HarvestCDP(el.Certificate); certs++; } } n++; }
+      if(signer!=null) signer.Dispose(); if(tsa!=null) tsa.Dispose();   // this loop walks a whole directory; both are re-assigned next iteration
     }catch{} }
     var b=new StringBuilder("{\"warmed_files\":"+n+",\"chain_certs\":"+certs+",\"crl_ocsp_urls_cached\":["); bool fst=true; foreach(var u in harvestedCDP){ if(!fst)b.Append(","); b.Append(J(u)); fst=false; } return b.Append("]}").ToString();
   }
@@ -348,11 +360,18 @@ public partial class Validator {
       int res=VerifyBinary(path,out signer,out sigType,out tsa,out signTime);
       if(signer!=null) embeddedCerts=PeEmbeddedCerts(path);
       bool contentOk=true;
+      // Script paths: contentOk is true only where a digest was actually compared. MapPs("UnknownError")
+      // is PsStatus's 15s-timeout/Kill/exception path, not an answer, so it must not read as verified --
+      // and must agree with the binary branch below, which treats UnknownError the same way.
       if((uint)res==0x800B0100){ byte[] der=ScriptPkcs7(path);
-        if(der!=null){ bool sigOk=VerifyScript(path,der,out signer,out contentOk,out tsa,out signTime); sigType="Script";
-          if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); contentOk=(status!="HashMismatch"); if(status=="NotSigned"){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); signer=null; tsa=null; sigType="None"; } }
+        // VerifyScript reassigns signer/tsa and the embeddedCerts static. The catalog fallback can
+        // reach here with all three already populated (anyCat sets signer before returning catRes,
+        // which may itself be TRUST_E_NOSIGNATURE), so release them before they are overwritten.
+        if(der!=null){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _pc in embeddedCerts) _pc.Dispose(); embeddedCerts=null; }
+          bool sigOk=VerifyScript(path,der,out signer,out contentOk,out tsa,out signTime); sigType="Script";
+          if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); contentOk=(status=="Valid"||status=="UntrustedRoot"); if(status=="NotSigned"){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); signer=null; tsa=null; sigType="None"; } }
           else { if(!sigOk||!contentOk) status="HashMismatch"; else status="__chain__"; } }
-        else { if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else status="NotSigned"; }
+        else { if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); contentOk=(status=="Valid"||status=="UntrustedRoot"); if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else { status="NotSigned"; contentOk=false; } }
       } else { status=MapBin(res);
         // content_verified answers "was the signed digest checked against the bytes on disk, and did
         // it match" -- not "is this trusted". WinVerifyTrust checked the digest on every outcome here
@@ -360,7 +379,16 @@ public partial class Validator {
         // those are the only false cases: Revoked/UntrustedRoot are trust failures over a GOOD digest.
         // Without this the initial `true` above survived, so a tampered signed binary reported
         // status=HashMismatch alongside content_verified=true.
-        contentOk = (status!="HashMismatch" && status!="UnknownError" && status!="NotSigned");
+        // Gate on the wintrust CODE, not MapBin's string: MapBin names only four codes and collapses
+        // everything else into "UnknownError", including the cert-policy failures where WinVerifyTrust
+        // DID check the digest and it DID match (it runs the SIP/digest step before the policy step).
+        // Deriving from the string reported content_verified:false for every expired-cert binary.
+        switch((uint)res){
+          case 0x800B0101: case 0x800B0109: case 0x800B010A: case 0x800B010C:
+          case 0x800B0110: case 0x800B0111: case 0x800B0106:
+            contentOk=true; break;                 // digest verified, certificate policy rejected
+          default: contentOk=(res==0); break;      // 0 = verified; anything else we cannot claim to know
+        }
         if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
       var b=new StringBuilder(); b.Append("{\"file_sha256\":").Append(J(sha));
       string chainJson="null";
@@ -383,6 +411,6 @@ public partial class Validator {
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
       return b.ToString();
       }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} return ErrJson(sha,"UnknownError",_ex.GetType().Name); }
-      finally{ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); } embeddedCerts=null; if(ch!=null)ch.Dispose(); }   // exception-safe: dispose the certs AND the chain on every path, and drop the static so it never roots disposed handles
+      finally{ if(ch!=null)ch.Dispose(); if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); } embeddedCerts=null; }   // exception-safe: dispose the certs AND the chain on every path, and drop the static so it never roots disposed handles
   }
 }
