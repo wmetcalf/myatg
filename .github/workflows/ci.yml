@@ -56,14 +56,24 @@ jobs:
           # MapBin-string form and the new wintrust-code switch, so they cannot catch a revert. An
           # intact binary with an EXPIRED signer is the case that differs: string form -> UnknownError
           # -> false; code form -> 0x800B0101 -> true. Short-lived cert, sign while valid, then wait.
-          $se = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-cv-exp -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddSeconds(25)
+          # The cert must be TRUSTED, else wintrust returns CERT_E_UNTRUSTEDROOT (0x800B0109) and never
+          # reaches CERT_E_EXPIRED (0x800B0101) -- and UntrustedRoot is true under BOTH the old string
+          # form and the new code switch, so it discriminates nothing.
+          $se = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-cv-exp -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddSeconds(30)
+          foreach ($sn in 'Root','TrustedPublisher') {
+            $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($sn,'LocalMachine')
+            $st.Open('ReadWrite'); $st.Add($se); $st.Close()
+          }
           Copy-Item .\myatg.exe .\expired.exe -Force
           $null = Set-AuthenticodeSignature -FilePath expired.exe -Certificate $se
           if ((Get-AuthenticodeSignature expired.exe).Status -eq "NotSigned") { Write-Error "fixture never got signed"; exit 1 }
-          Start-Sleep -Seconds 35
+          Start-Sleep -Seconds 40
           $e = .\myatg.exe --rev none expired.exe | ConvertFrom-Json
           Write-Host "expired : type=$($e.signature_type) status=$($e.status) content_verified=$($e.content_verified) err=$($e.error)"
           if ($e.signature_type -ne "Embedded") { Write-Error "expired fixture took the $($e.signature_type) path"; exit 1 }
+          # Self-validating: if this is not the expired code, the vector is not discriminating and the
+          # step must fail rather than pass for the wrong reason.
+          if ($e.error -notlike "*800B0101*") { Write-Error "expected wintrust=0x800B0101 (CERT_E_EXPIRED), got status=$($e.status) error=$($e.error) - vector is not exercising the fix"; exit 1 }
           if ($e.content_verified -ne $true) { Write-Error "intact expired-cert binary reported content_verified=$($e.content_verified) - the digest matched"; exit 1 }
 
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
