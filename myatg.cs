@@ -165,11 +165,18 @@ public partial class Validator {
       ind.dataOid=Marshal.StringToHGlobalAnsi(dataOid); ind.dataVal.cb=(uint)dataVal.Length; ind.dataVal.p=Marshal.AllocHGlobal(dataVal.Length); Marshal.Copy(dataVal,0,ind.dataVal.p,dataVal.Length); ind.algo.oid=Marshal.StringToHGlobalAnsi(algoOid); ind.digest.cb=(uint)digest.Length; ind.digest.p=Marshal.AllocHGlobal(digest.Length); Marshal.Copy(digest,0,ind.digest.p,digest.Length);
       Guid sip=Guid.Empty; CryptSIPRetrieveSubjectGuid(path,IntPtr.Zero,ref sip); var di=new DISP(); di.cbSize=(uint)Marshal.SizeOf(typeof(DISP)); if(CryptSIPLoad(ref sip,0,ref di)){
         var vf=(VerifyFn)Marshal.GetDelegateForFunctionPointer(di.pfVerify,typeof(VerifyFn));
-        hFileS=CreateFile(path,GR,FSR,IntPtr.Zero,OE,0,IntPtr.Zero); CryptAcquireContext(ref hProv,null,null,24,0xF0000000);
-        pg=Marshal.AllocHGlobal(16); Marshal.StructureToPtr(sip,pg,false);
-        sdig=Marshal.StringToHGlobalAnsi(algoOid);
-        var s=new SUBJ(); s.cbSize=(uint)Marshal.SizeOf(typeof(SUBJ)); s.pgType=pg; s.hFile=hFileS; s.file=path; s.enc=0x10001; s.hProv=hProv; s.dig.oid=sdig;
-        contentOk = vf(ref s,ref ind)==0; digestChecked=true;
+        hFileS=CreateFile(path,GR,FSR,IntPtr.Zero,OE,0,IntPtr.Zero);
+        bool _provOk=CryptAcquireContext(ref hProv,null,null,24,0xF0000000);
+        // Only a comparison that actually RAN may set digestChecked. Feeding the SIP an
+        // INVALID_HANDLE_VALUE file handle or a null provider yields a nonzero result that is
+        // indistinguishable from a real mismatch, and the caller would report tampering for a
+        // file it could not even open. The sibling CreateFile at VerifyBinary checks the same way.
+        if(hFileS!=IntPtr.Zero && hFileS!=new IntPtr(-1) && _provOk){
+          pg=Marshal.AllocHGlobal(16); Marshal.StructureToPtr(sip,pg,false);
+          sdig=Marshal.StringToHGlobalAnsi(algoOid);
+          var s=new SUBJ(); s.cbSize=(uint)Marshal.SizeOf(typeof(SUBJ)); s.pgType=pg; s.hFile=hFileS; s.file=path; s.enc=0x10001; s.hProv=hProv; s.dig.oid=sdig;
+          contentOk = vf(ref s,ref ind)==0; digestChecked=true;
+        }
       }
     } finally {
       if(ind.dataOid!=IntPtr.Zero)Marshal.FreeHGlobal(ind.dataOid); if(ind.dataVal.p!=IntPtr.Zero)Marshal.FreeHGlobal(ind.dataVal.p); if(ind.algo.oid!=IntPtr.Zero)Marshal.FreeHGlobal(ind.algo.oid); if(ind.digest.p!=IntPtr.Zero)Marshal.FreeHGlobal(ind.digest.p);
@@ -377,8 +384,12 @@ public partial class Validator {
           if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status=="NotSigned"){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); signer=null; tsa=null; sigType="None"; } }
           // "we could not parse SpcIndirectData" is NOT "the digest did not match" -- reporting
           // HashMismatch there would assert tampering the tool never tested for.
-          else if(!digestChecked){ status="UnknownError"; diag="script content check did not run (unparseable SpcIndirectData, or no SIP for this subject type)"; }
-          else { if(!sigOk||!contentOk) status="HashMismatch"; else status="__chain__"; } }
+          else if(!digestChecked){ status="UnknownError"; diag="script content check did not run (unparseable SpcIndirectData, no SIP for this subject type, or the file/provider could not be opened); cms_signature="+(sigOk?"valid":"INVALID"); }
+          // A broken CMS signature means the digest we compared against is not authentically
+          // bound to this file, so content_verified cannot stand either -- otherwise this emits
+          // status=HashMismatch beside content_verified=true, exactly the contradiction the
+          // binary branch was fixed to stop producing.
+          else { if(!sigOk||!contentOk){ status="HashMismatch"; contentOk=false; } else status="__chain__"; } }
         else { if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else { status="NotSigned"; contentOk=false; } }
       } else { status=MapBin(res);
         // content_verified answers "was the signed digest checked against the bytes on disk, and did
