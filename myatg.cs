@@ -135,8 +135,13 @@ public partial class Validator {
     // Same scan, O(signature-block) memory.
     var sb=new StringBuilder(); bool inb=false;
     try{ using(var sr=new StreamReader(path,Encoding.GetEncoding(28591),true)){ string raw; while((raw=sr.ReadLine())!=null){ string t=raw.Trim();
-      if(t.IndexOf("Begin signature block",StringComparison.OrdinalIgnoreCase)>=0){ inb=true; continue; }
-      if(t.IndexOf("End signature block",StringComparison.OrdinalIgnoreCase)>=0){ inb=false; continue; }
+      // The delimiter is a COMMENT line, so require the leading '#'. A substring match alone lets a
+      // script that merely mentions the phrase (a string literal, a doc comment) open the block early
+      // and accumulate program text. Reset on every opening marker too: the real signature block is
+      // appended last, so the final marker wins and any earlier false start is discarded.
+      bool isCmt = t.Length>0 && t[0]=='#';
+      if(isCmt && t.IndexOf("Begin signature block",StringComparison.OrdinalIgnoreCase)>=0){ inb=true; sb.Length=0; continue; }
+      if(isCmt && t.IndexOf("End signature block",StringComparison.OrdinalIgnoreCase)>=0){ inb=false; continue; }
       if(!inb) continue;
       // The framing differs from the marker: PowerShell writes "# SIG # Begin signature block" but
       // prefixes the base64 body with a bare "# ". Deriving the prefix from the marker (the old

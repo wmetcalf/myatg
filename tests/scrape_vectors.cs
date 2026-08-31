@@ -15,6 +15,7 @@ public class ScrapeTest {
       catch(TargetInvocationException e){ err=e.InnerException.GetType().Name; }
       if(err!=null){ Console.WriteLine("  {0}: THREW {1}",path,err); fail++; continue; }
       if(der==null){ Console.WriteLine("  {0}: scrape returned NULL (cannot read the signature block)",path); fail++; continue; }
+      // a decoy mention of the phrase in program text must not corrupt the scrape
       // prove it is a real PKCS#7 by decoding it
       try{
         var cms=new System.Security.Cryptography.Pkcs.SignedCms(); cms.Decode(der);
