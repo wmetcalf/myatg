@@ -93,7 +93,7 @@ jobs:
           $null = Set-AuthenticodeSignature -FilePath distrust.exe -Certificate $d
           $st = New-Object System.Security.Cryptography.X509Certificates.X509Store('Disallowed','CurrentUser')
           $st.Open('ReadWrite'); $st.Add($d); $st.Close()
-          $x = .\distrust.exe 2>$null; $r = .\myatg.exe --rev none distrust.exe | ConvertFrom-Json
+          $r = .\myatg.exe --rev none distrust.exe | ConvertFrom-Json
           Write-Host "distrusted: status=$($r.status) content_verified=$($r.content_verified) err=$($r.error)"
           if ($r.status -ne "Distrusted") { Write-Error "expected Distrusted, got $($r.status) (err=$($r.error))"; exit 1 }
           # RDP: an unsigned .rdp must still carry the full field set
