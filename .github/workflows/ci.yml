@@ -79,12 +79,23 @@ jobs:
           if ($e.error -notlike "*800B0101*") { Write-Error "expected wintrust=0x800B0101 in error, got $($e.error)"; exit 1 }
           if ($e.content_verified -ne $true) { Write-Error "intact expired-cert binary reported content_verified=$($e.content_verified) - the digest matched"; exit 1 }
 
-      - name: Smoke — Distrusted mapping and the RDP verdict fields
+      - name: Smoke — RDP verdict fields
         shell: pwsh
+        timeout-minutes: 3
         run: |
-          # MapBin gained TWO cases; the expired vector covers 0x800B0101. This covers 0x800B0111
-          # by putting the signer in the Disallowed store, and covers the RDP field set, which had
-          # no CI coverage at all despite this change adding four fields to three of its exits.
+          # This path had no CI coverage at all before, despite gaining four fields on three exits.
+          Set-Content plain.rdp -Value "full address:s:host.example" -Encoding UTF8
+          $p = .\myatg.exe --rev none plain.rdp | ConvertFrom-Json
+          Write-Host "rdp: status=$($p.status) type=$($p.signature_type) cv=$($p.content_verified) sha=$($p.file_sha256)"
+          foreach ($f in 'file_sha256','signature_type','content_verified','graveyard','signer','chain') {
+            if ($null -eq $p.PSObject.Properties[$f]) { Write-Error "unsigned .rdp is missing $f"; exit 1 } }
+          if ($p.signature_type -ne "None") { Write-Error "expected signature_type None, got $($p.signature_type)"; exit 1 }
+
+      - name: Smoke — Distrusted mapping (0x800B0111)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          # MapBin gained two cases; the expired vector covers 0x800B0101, this covers 0x800B0111.
           $d = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-distrust -CertStoreLocation Cert:\CurrentUser\My
           foreach ($sn in 'Root','TrustedPublisher') {
             $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($sn,'CurrentUser')
@@ -96,13 +107,6 @@ jobs:
           $r = .\myatg.exe --rev none distrust.exe | ConvertFrom-Json
           Write-Host "distrusted: status=$($r.status) content_verified=$($r.content_verified) err=$($r.error)"
           if ($r.status -ne "Distrusted") { Write-Error "expected Distrusted, got $($r.status) (err=$($r.error))"; exit 1 }
-          # RDP: an unsigned .rdp must still carry the full field set
-          Set-Content plain.rdp -Value "full address:s:host.example" -Encoding UTF8
-          $p = .\myatg.exe --rev none plain.rdp | ConvertFrom-Json
-          Write-Host "rdp: status=$($p.status) type=$($p.signature_type) cv=$($p.content_verified) sha=$($p.file_sha256)"
-          foreach ($f in 'file_sha256','signature_type','content_verified','graveyard','signer','chain') {
-            if ($null -eq $p.PSObject.Properties[$f]) { Write-Error "unsigned .rdp is missing $f"; exit 1 } }
-          if ($p.signature_type -ne "None") { Write-Error "expected signature_type None, got $($p.signature_type)"; exit 1 }
 
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
