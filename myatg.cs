@@ -208,7 +208,7 @@ public partial class Validator {
   }
   static bool IsTrustedRoot(X509Certificate2 c){ if(c==null||c.Thumbprint==null) return false; return RootThumbs().Contains(c.Thumbprint); }
   static string UrlArr(System.Collections.Generic.List<string> l){ var b=new StringBuilder("["); for(int i=0;i<l.Count;i++){ if(i>0)b.Append(","); b.Append(J(l[i])); } return b.Append("]").ToString(); }
-  static string TbsAlg(X509Certificate2 c, string alg){ byte[] raw=c.RawData; int p=1; int l=raw[p++]; if(l>=0x80){int n=l&0x7F;l=0;for(int i=0;i<n;i++)l=(l<<8)|raw[p++];} int s=p; int q=s+1; int tl=raw[q++]; if(tl>=0x80){int n=tl&0x7F;tl=0;for(int i=0;i<n;i++)tl=(tl<<8)|raw[q++];} int tot=(q-s)+tl; byte[] t=new byte[tot]; Array.Copy(raw,s,t,0,tot); using(var h=HashAlgorithm.Create(alg)) return BitConverter.ToString(h.ComputeHash(t)).Replace("-","").ToLower(); }
+  public static string TbsAlg(X509Certificate2 c, string alg){ byte[] raw=c.RawData; int p=1; int l=raw[p++]; if(l>=0x80){int n=l&0x7F;l=0;for(int i=0;i<n;i++)l=(l<<8)|raw[p++];} int s=p; int q=s+1; int tl=raw[q++]; if(tl>=0x80){int n=tl&0x7F;tl=0;for(int i=0;i<n;i++)tl=(tl<<8)|raw[q++];} int tot=(q-s)+tl; byte[] t=new byte[tot]; Array.Copy(raw,s,t,0,tot); using(var h=HashAlgorithm.Create(alg)) return BitConverter.ToString(h.ComputeHash(t)).Replace("-","").ToLower(); }
   public static string CertJson(X509Certificate2 c){ if(c==null) return "null"; var eku=new System.Collections.Generic.List<string>(); bool cs=false; foreach(var e in c.Extensions){ var k=e as X509EnhancedKeyUsageExtension; if(k!=null){ foreach(var o in k.EnhancedKeyUsages){ eku.Add(o.Value); if(o.Value=="1.3.6.1.5.5.7.3.3") cs=true; } } }
     var sb=new StringBuilder("{"); sb.Append("\"subject\":").Append(J(c.Subject)).Append(",\"subject_cn\":").Append(J(CN(c,false))).Append(",\"issuer\":").Append(J(c.Issuer)).Append(",\"issuer_cn\":").Append(J(CN(c,true)));
     sb.Append(",\"serial_number\":").Append(J(c.SerialNumber)).Append(",\"thumbprint\":").Append(J(c.Thumbprint)).Append(",\"md5_fingerprint\":").Append(J(Md5Cert(c))).Append(",\"sha1_fingerprint\":").Append(J(c.Thumbprint.ToLower())).Append(",\"sha256_fingerprint\":").Append(J(Sha256Cert(c)));
@@ -226,7 +226,7 @@ public partial class Validator {
     for(int li=1;li<lines.Length;li++){ var f=SplitCsv(lines[li]); string[] rec={ iMal>=0&&iMal<f.Length?f[iMal]:"", iTyp>=0&&iTyp<f.Length?f[iTyp]:"" };
       if(iTbs>=0&&iTbs<f.Length&&f[iTbs].Length>0) gvTbs[f[iTbs].ToLower()]=rec; if(iThumb>=0&&iThumb<f.Length&&f[iThumb].Length>0) gvThumb[f[iThumb].Replace(" ","").ToUpper()]=rec; if(iSer>=0&&iSer<f.Length&&f[iSer].Length>0) gvSerial[f[iSer].Replace(" ","").ToUpper()]=rec; if(iHash>=0&&iHash<f.Length&&f[iHash].Length>0) gvHash[f[iHash].ToLower()]=rec; } }
   static string[] SplitCsv(string line){ var o=new System.Collections.Generic.List<string>(); var cur=new StringBuilder(); bool q=false; foreach(char c in line){ if(c=='"') q=!q; else if(c==','&&!q){ o.Add(cur.ToString()); cur.Clear(); } else cur.Append(c); } o.Add(cur.ToString()); return o.ToArray(); }
-  static string GraveyardJson(string thumb, string serial, string tbs, string fileSha){ if(gvTbs==null) return "{\"hit\":false}"; string[] r=null; string on=null;
+  public static string GraveyardJson(string thumb, string serial, string tbs, string fileSha){ if(gvTbs==null) return "{\"hit\":false}"; string[] r=null; string on=null;
     if(tbs!=null&&gvTbs.TryGetValue(tbs.ToLower(),out r)) on="cert_tbs_sha256"; else if(thumb!=null&&gvThumb.TryGetValue(thumb.Replace(" ","").ToUpper(),out r)) on="cert_thumbprint"; else if(serial!=null&&gvSerial.TryGetValue(serial.Replace(" ","").ToUpper(),out r)) on="cert_serial"; else if(fileSha!=null&&gvHash.TryGetValue(fileSha.ToLower(),out r)) on="file_sha256";
     if(r==null) return "{\"hit\":false}"; return "{\"hit\":true,\"matched_on\":"+J(on)+",\"malware\":"+J(r[0])+",\"malware_type\":"+J(r[1])+"}"; }
 
@@ -279,7 +279,7 @@ public partial class Validator {
   }
 
   static string J(string s){ if(s==null)return "null"; var b=new StringBuilder("\""); foreach(char ch in s){ if(ch=='\\')b.Append("\\\\"); else if(ch=='"')b.Append("\\\""); else if(ch<0x20||ch>0x7E)b.Append("\\u").Append(((int)ch).ToString("x4")); else b.Append(ch); } b.Append("\""); return b.ToString(); }
-  static string Sha(string path){ using(var s=File.OpenRead(path)) using(var h=SHA256.Create()) return BitConverter.ToString(h.ComputeHash(s)).Replace("-","").ToLower(); }
+  public static string Sha(string path){ using(var s=File.OpenRead(path)) using(var h=SHA256.Create()) return BitConverter.ToString(h.ComputeHash(s)).Replace("-","").ToLower(); }
   // Parse the PE security directory's WIN_CERTIFICATE PKCS#7 and return its embedded certs (for ExtraStore); null if none/not a PE
   static X509Certificate2Collection PeEmbeddedCerts(string path){ try{
     using(var fs=File.OpenRead(path)){
@@ -296,7 +296,7 @@ public partial class Validator {
       byte[] pkcs7=new byte[blobLen]; int got=0; while(got<blobLen){ int r=fs.Read(pkcs7,got,blobLen-got); if(r<=0) break; got+=r; } if(got<blobLen) return null;
       var cms=new SignedCms(); cms.Decode(pkcs7); return cms.Certificates;
     } }catch{ return null; } }
-  static string MapBin(int r){ uint u=(uint)r; if(r==0)return "Valid"; switch(u){ case 0x800B0100:return "NotSigned"; case 0x80096010:return "HashMismatch"; case 0x800B010C:return "Revoked"; case 0x800B0109:return "UntrustedRoot"; default:return "UnknownError"; } }
+  static string MapBin(int r){ uint u=(uint)r; if(r==0)return "Valid"; switch(u){ case 0x800B0100:return "NotSigned"; case 0x80096010:return "HashMismatch"; case 0x800B010C:return "Revoked"; case 0x800B0109:return "UntrustedRoot"; case 0x800B0101:return "Expired"; case 0x800B0111:return "Distrusted"; default:return "UnknownError"; } }
   static string ErrJson(string fileSha, string status, string error){ return "{\"file_sha256\":"+J(fileSha)+",\"status\":"+J(status)+",\"error\":"+J(error)+",\"signature_type\":\"None\",\"content_verified\":false,\"is_os_binary\":false,\"signer\":null,\"chain\":null,\"graveyard\":{\"hit\":false},\"timestamped\":false,\"sign_time\":null,\"sign_time_verified\":false,\"timestamper\":null,\"ms\":0}"; }
 
   public static void Main(string[] a){
@@ -395,13 +395,18 @@ public partial class Validator {
           else { if(!sigOk||!contentOk){ status="HashMismatch"; diag=!sigOk?(contentOk?"cms signature invalid; content digest matched":"cms signature invalid; content digest mismatched"):"content digest mismatched; cms signature valid"; contentOk=false; } else status="__chain__"; } }
         else { if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else { status="NotSigned"; contentOk=false; } }
       } else { status=MapBin(res);
+        // CERT_E_EXPIRED (0x800B0101) means the certificate is outside its validity period in
+        // EITHER direction -- wintrust returns it for a future-dated NotBefore as well. Mapping it
+        // unconditionally to "Expired" mislabels that case, and the vocabulary already carries
+        // NotYetValid (rdp_validate distinguishes the two). Use the recovered signer's dates.
+        if(status=="Expired" && signer!=null){ try{ if(DateTime.UtcNow < signer.NotBefore.ToUniversalTime()) status="NotYetValid"; }catch{} }
         // content_verified answers "was the signed digest checked against the bytes on disk, and did
         // it match" -- not "is this trusted". WinVerifyTrust checked the digest on every outcome here
         // except a mismatch (checked, failed) and an unrecognised error (we cannot claim to know), so
         // those are the only false cases: Revoked/UntrustedRoot are trust failures over a GOOD digest.
         // Without this the initial `true` above survived, so a tampered signed binary reported
         // status=HashMismatch alongside content_verified=true.
-        // Gate on the wintrust CODE, not MapBin's string: MapBin names only four codes and collapses
+        // Gate on the wintrust CODE, not MapBin's string: MapBin names only a handful of codes and collapses
         // everything else into "UnknownError", including the cert-policy failures where WinVerifyTrust
         // DID check the digest and it DID match (it runs the SIP/digest step before the policy step).
         // Deriving from the string reported content_verified:false for every expired-cert binary.
@@ -420,7 +425,7 @@ public partial class Validator {
         // outcome -- it is wintrust's generic failure, carrying no evidence the digest step ran.
         { uint _u=(uint)res; contentOk = (res==0) || (_u>=0x800B0101 && _u<=0x800B0114 && _u!=0x800B010B)
                                        || _u==0x80096003 || _u==0x80096005 || _u==0x80096019; }
-        if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
+        if(status=="UnknownError"||status=="HashMismatch"||status=="Expired"||status=="Distrusted") diag="wintrust=0x"+((uint)res).ToString("X8"); }
       var b=new StringBuilder(); b.Append("{\"file_sha256\":").Append(J(sha));
       string chainJson="null";
       if(signer!=null){

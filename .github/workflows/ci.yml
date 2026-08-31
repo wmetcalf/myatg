@@ -73,8 +73,30 @@ jobs:
           if ($e.signature_type -ne "Embedded") { Write-Error "expired fixture took the $($e.signature_type) path"; exit 1 }
           # Self-validating: if this is not the expired code, the vector is not discriminating and the
           # step must fail rather than pass for the wrong reason.
-          if ($e.error -notlike "*800B0101*") { Write-Error "expected wintrust=0x800B0101 (CERT_E_EXPIRED), got status=$($e.status) error=$($e.error) - vector is not exercising the fix"; exit 1 }
+          # Only 0x800B0101 maps to Expired, so asserting the status proves the vector reached
+          # the intended code AND pins the #7 fix; the raw code stays in `error` as a cross-check.
+          if ($e.status -ne "Expired") { Write-Error "expected status=Expired, got $($e.status) (error=$($e.error)) - vector is not exercising CERT_E_EXPIRED"; exit 1 }
+          if ($e.error -notlike "*800B0101*") { Write-Error "expected wintrust=0x800B0101 in error, got $($e.error)"; exit 1 }
           if ($e.content_verified -ne $true) { Write-Error "intact expired-cert binary reported content_verified=$($e.content_verified) - the digest matched"; exit 1 }
+
+      - name: Smoke — RDP verdict fields
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          # This path had no CI coverage at all before, despite gaining four fields on three exits.
+          Set-Content plain.rdp -Value "full address:s:host.example" -Encoding UTF8
+          $p = .\myatg.exe --rev none plain.rdp | ConvertFrom-Json
+          Write-Host "rdp: status=$($p.status) type=$($p.signature_type) cv=$($p.content_verified) sha=$($p.file_sha256)"
+          foreach ($f in 'file_sha256','status','signature_type','content_verified','graveyard','signer','chain','is_os_binary','timestamped','sign_time','timestamper','ms') {
+            if ($null -eq $p.PSObject.Properties[$f]) { Write-Error "unsigned .rdp is missing $f"; exit 1 } }
+          if ($p.signature_type -ne "None") { Write-Error "expected signature_type None, got $($p.signature_type)"; exit 1 }
+          # DISCRIMINATION: ErrJson (returned when RdpVal.Validate throws) emits every key above with
+          # signature_type "None" too, so key-presence alone passes even with the RDP path completely
+          # dead. These three only hold if RdpVal actually ran and produced the unsigned verdict.
+          if ($p.status -ne "NotSigned") { Write-Error "expected status NotSigned, got $($p.status) - RdpVal may not have run"; exit 1 }
+          if ($p.PSObject.Properties['error']) { Write-Error "unexpected error field: $($p.error) - this is the ErrJson fallback, not the RDP path"; exit 1 }
+          $expect = (Get-FileHash plain.rdp -Algorithm SHA256).Hash.ToLower()
+          if ($p.file_sha256 -ne $expect) { Write-Error "file_sha256 $($p.file_sha256) != actual $expect"; exit 1 }
 
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd

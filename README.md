@@ -184,8 +184,20 @@ Always emits the same field set (error/oversize cases too, with null/empty value
 `file_sha256, status, signature_type, content_verified, is_os_binary, signer, chain,
 graveyard, timestamped, sign_time, timestamper, ms`.
 
-`status` ∈ `Valid, NotSigned, HashMismatch, Revoked, Distrusted, UntrustedRoot, Expired
-(RDP), UnknownError`.
+`content_verified` answers "does the content match what was signed". The subject differs
+by type: for PE/catalog/script it is the file bytes; for **RDP** it is the canonical
+settings text named by `signscope`, and it is `false` when a signed key is shadowed by a
+later duplicate — reconstruction is first-wins but `mstsc.exe` parses last-wins, so a
+valid signature over shadowed settings is *not* content the consumer will act on.
+
+`status` ∈ `Valid, NotSigned, HashMismatch, Revoked, Distrusted, UntrustedRoot, Expired,
+NotYetValid, UnknownError`. `Expired` means the signing certificate is outside its validity window at the time the
+verdict was formed. Three paths produce it and they differ: PE/catalog from wintrust
+`CERT_E_EXPIRED`, native script from a `NotTimeValid` chain flag, RDP from comparing
+`NotAfter` against now. None of them consults the timestamp, so a timestamped signature
+that wintrust still rejects as expired reports `Expired` too. `content_verified` is
+usually `true` for these — the digest was compared and matched before the policy check
+failed — but not always: it is forced `false` when no signer certificate was recovered.
 
 `chain.chain[]` is the full leaf→intermediate→root list. Each cert (and `signer`) carries:
 `subject(+_cn), issuer(+_cn), serial_number, thumbprint, md5/sha1/sha256_fingerprint,
@@ -1016,8 +1028,11 @@ A typosquatted domain, signed with a Let's Encrypt **TLS** cert — note the EKU
 ```json
 {
   "file": "f01392.rdp",
+  "file_sha256": "1916af4debbeaa0ee688c95d2d9d25196bd5765bad5c7a9c1ed7e934e6ffb9ba",
   "status": "Expired",
   "signature_type": "RDP",
+  "content_verified": true,
+  "graveyard": { "hit": false },
   "signer": {
     "subject": "CN=ukrtelecom.eu",
     "subject_cn": "ukrtelecom.eu",
