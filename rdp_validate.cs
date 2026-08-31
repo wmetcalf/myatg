@@ -24,7 +24,7 @@ public class RdpVal {
     // signature analysis always describe the same snapshot.
     string oshaEarly=null; long _len=-1; try{ _len=new FileInfo(path).Length; }catch{}
     if(_len > 8L*1024*1024){ try{ oshaEarly=Validator.Sha(path); }catch{} }
-    if(_len > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(oshaEarly)+",\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,oshaEarly)+"}";
+    if(_len > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(oshaEarly)+",\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,oshaEarly)+",\"is_os_binary\":false,\"timestamped\":false,\"timestamper\":null,\"ms\":"+_sw.ElapsedMilliseconds+"}";
     byte[] rawBytes=File.ReadAllBytes(path);
     string text; using(var _ms=new MemoryStream(rawBytes)) using(var _sr=new StreamReader(_ms,Encoding.UTF8,true)) text=_sr.ReadToEnd();  // same BOM auto-detection as ReadAllText
     using(var _h=System.Security.Cryptography.SHA256.Create()) oshaEarly=BitConverter.ToString(_h.ComputeHash(rawBytes)).Replace("-","").ToLowerInvariant();
@@ -35,7 +35,7 @@ public class RdpVal {
     // GraveyardJson matches on file_sha256 alone, so an UNSIGNED .rdp whose hash is in the CSV
     // must still be looked up -- hard-coding hit:false here would silently drop exactly the
     // known-bad files this field exists to surface, which is the omission this change fixes.
-    if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+"}").ToString(); }
+    if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+",\"is_os_binary\":false,\"timestamped\":false,\"timestamper\":null,\"ms\":"+_sw.ElapsedMilliseconds+"}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
     var _sw=System.Diagnostics.Stopwatch.StartNew(); bool sawSignTime=false;
     string status; X509Certificate2 signer=null; bool sigOk=false; bool contentSigOk=false; var chainInfo="null";
