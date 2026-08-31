@@ -87,7 +87,7 @@ jobs:
           Set-Content plain.rdp -Value "full address:s:host.example" -Encoding UTF8
           $p = .\myatg.exe --rev none plain.rdp | ConvertFrom-Json
           Write-Host "rdp: status=$($p.status) type=$($p.signature_type) cv=$($p.content_verified) sha=$($p.file_sha256)"
-          foreach ($f in 'file_sha256','signature_type','content_verified','graveyard','signer','chain','is_os_binary','timestamped','timestamper','ms') {
+          foreach ($f in 'file_sha256','status','signature_type','content_verified','graveyard','signer','chain','is_os_binary','timestamped','sign_time','timestamper','ms') {
             if ($null -eq $p.PSObject.Properties[$f]) { Write-Error "unsigned .rdp is missing $f"; exit 1 } }
           if ($p.signature_type -ne "None") { Write-Error "expected signature_type None, got $($p.signature_type)"; exit 1 }
           # DISCRIMINATION: ErrJson (returned when RdpVal.Validate throws) emits every key above with
