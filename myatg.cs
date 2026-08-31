@@ -102,7 +102,30 @@ public partial class Validator {
     if(l<0||l>b.Length) throw new Exception("der: content length out of range");
     hl=p-o; ln=l; return tag; }
   static byte[] Sub(byte[] b,int o,int l){ if(b==null||o<0||l<0||o>b.Length||l>b.Length-o) throw new Exception("der: sub-range out of bounds"); var r=new byte[l]; Array.Copy(b,o,r,0,l); return r; }
-  static string Oid(byte[] b){ var s=new StringBuilder(); s.Append(b[0]/40).Append('.').Append(b[0]%40); long v=0; for(int i=1;i<b.Length;i++){v=(v<<7)|(uint)(b[i]&0x7F); if((b[i]&0x80)==0){s.Append('.').Append(v);v=0;}} return s.ToString(); }
+  // X.690 8.19: EVERY subidentifier is a base-128 varint, including the first, which encodes
+  // 40*X+Y and spans multiple bytes once it exceeds 127 -- so the first arc cannot be read out of
+  // b[0] alone. Malformed input throws (same idiom as TLV/Sub above) rather than returning a
+  // plausible string: a value with no valid DER preimage must never reach an OID equality test
+  // or get marshalled into the native SIP.
+  static string Oid(byte[] b){
+    if(b==null||b.Length==0) throw new Exception("der: empty OID");
+    // Streams straight into the StringBuilder: buffering the arcs in a List<long> would cost 8 bytes
+    // of heap per input byte, and maxBytes is 500MB with OutOfMemoryException rethrown all the way out
+    // through the HTTP layer -- the same amplification class the oversized-TLV CI test exists to catch.
+    var s=new StringBuilder(); long v=0; int len=0; bool first=true;
+    for(int i=0;i<b.Length;i++){
+      if(len==0&&b[i]==0x80) throw new Exception("der: non-minimal OID subidentifier");
+      if(len>=9) throw new Exception("der: OID subidentifier too large");   // 9*7=63 bits; admits exactly long.MaxValue
+      v=(v<<7)|(uint)(b[i]&0x7F); len++;
+      if((b[i]&0x80)==0){
+        if(first){ long x=v<40?0:(v<80?1:2); s.Append(x).Append('.').Append(v-40*x); first=false; }
+        else s.Append('.').Append(v);
+        v=0; len=0;
+      }
+    }
+    if(len!=0) throw new Exception("der: truncated OID subidentifier");
+    return s.ToString();
+  }
   static byte[] ScriptPkcs7(string path){
     try{ if(new FileInfo(path).Length > maxBytes) return null; }catch{ return null; }
     // Detect the BOM (UTF-16LE/BE, UTF-8 — normal for signed .ps1) and decode with it;
@@ -118,28 +141,42 @@ public partial class Validator {
     if(sb.Length==0) return null;
     try{ return Convert.FromBase64String(sb.ToString()); }catch{ return null; }
   }
-  static bool VerifyScript(string path,byte[] der,out X509Certificate2 signer,out bool contentOk,out X509Certificate2 tsa,out DateTime? signTime){ tsa=null; signTime=null;
+  static bool VerifyScript(string path,byte[] der,out X509Certificate2 signer,out bool contentOk,out X509Certificate2 tsa,out DateTime? signTime,out bool digestChecked){ digestChecked=false; tsa=null; signTime=null;
     signer=null; contentOk=false; bool sigOk;
     var cms=new SignedCms(); cms.Decode(der); embeddedCerts=cms.Certificates; try{ cms.CheckSignature(true); sigOk=true; }catch{ sigOk=false; }
     signer=cms.SignerInfos[0].Certificate;
     try{ var csi=cms.SignerInfos[0].CounterSignerInfos; if(csi.Count>0){ tsa=csi[0].Certificate; foreach(var at in csi[0].SignedAttributes){ if(at.Oid.Value=="1.2.840.113549.1.9.5"&&at.Values.Count>0){ try{ var t=new Pkcs9SigningTime(at.Values[0].RawData); signTime=t.SigningTime.ToUniversalTime(); }catch{} } } } }catch{}
     if(tsa==null){ try{ foreach(var ua in cms.SignerInfos[0].UnsignedAttributes){ if(ua.Oid.Value=="1.3.6.1.4.1.311.3.3.1"&&ua.Values.Count>0){ var tok=new SignedCms(); tok.Decode(ua.Values[0].RawData); tsa=tok.SignerInfos[0].Certificate; signTime=TstGenTime(tok.ContentInfo.Content); } } }catch{} }
     byte[] ec=cms.ContentInfo.Content;
-    int hl,ln; TLV(ec,0,out hl,out ln); int c0=hl; int hl0,ln0; TLV(ec,c0,out hl0,out ln0); int d0=c0+hl0;
-    int hA,lA; TLV(ec,d0,out hA,out lA); string dataOid=Oid(Sub(ec,d0+hA,lA)); int vOff=d0+hA+lA; int hV,lV; TLV(ec,vOff,out hV,out lV); byte[] dataVal=Sub(ec,vOff,hV+lV);
-    int c1=c0+hl0+ln0; int hl1,ln1; TLV(ec,c1,out hl1,out ln1); int m0=c1+hl1; int hAi,lAi; TLV(ec,m0,out hAi,out lAi); int ao=m0+hAi; int hAo,lAo; TLV(ec,ao,out hAo,out lAo); string algoOid=Oid(Sub(ec,ao+hAo,lAo));
-    int dOff=m0+hAi+lAi; int hD,lD; TLV(ec,dOff,out hD,out lD); byte[] digest=Sub(ec,dOff+hD,lD);
+    string dataOid, algoOid; byte[] dataVal, digest;
+    // SpcIndirectData is attacker-controlled and opaque to SignedCms.Decode (see the comment above).
+    // Oid() throws on malformed DER, and TLV/Sub bound the TLV but not its content bytes -- so one
+    // crafted byte must NOT cost the whole verdict. contentOk is already false here; signer, chain and
+    // the graveyard lookup are legitimately known and stay reported.
+    try{
+      int hl,ln; TLV(ec,0,out hl,out ln); int c0=hl; int hl0,ln0; TLV(ec,c0,out hl0,out ln0); int d0=c0+hl0;
+      int hA,lA; TLV(ec,d0,out hA,out lA); dataOid=Oid(Sub(ec,d0+hA,lA)); int vOff=d0+hA+lA; int hV,lV; TLV(ec,vOff,out hV,out lV); dataVal=Sub(ec,vOff,hV+lV);
+      int c1=c0+hl0+ln0; int hl1,ln1; TLV(ec,c1,out hl1,out ln1); int m0=c1+hl1; int hAi,lAi; TLV(ec,m0,out hAi,out lAi); int ao=m0+hAi; int hAo,lAo; TLV(ec,ao,out hAo,out lAo); algoOid=Oid(Sub(ec,ao+hAo,lAo));
+      int dOff=m0+hAi+lAi; int hD,lD; TLV(ec,dOff,out hD,out lD); digest=Sub(ec,dOff+hD,lD);
+    }catch(OutOfMemoryException){ throw; }catch{ return sigOk; }   // digestChecked stays false: caller must not read this as a digest mismatch
     IntPtr pg=IntPtr.Zero, sdig=IntPtr.Zero, hProv=IntPtr.Zero, hFileS=IntPtr.Zero;
     var ind=new IND();
     try{
       ind.dataOid=Marshal.StringToHGlobalAnsi(dataOid); ind.dataVal.cb=(uint)dataVal.Length; ind.dataVal.p=Marshal.AllocHGlobal(dataVal.Length); Marshal.Copy(dataVal,0,ind.dataVal.p,dataVal.Length); ind.algo.oid=Marshal.StringToHGlobalAnsi(algoOid); ind.digest.cb=(uint)digest.Length; ind.digest.p=Marshal.AllocHGlobal(digest.Length); Marshal.Copy(digest,0,ind.digest.p,digest.Length);
       Guid sip=Guid.Empty; CryptSIPRetrieveSubjectGuid(path,IntPtr.Zero,ref sip); var di=new DISP(); di.cbSize=(uint)Marshal.SizeOf(typeof(DISP)); if(CryptSIPLoad(ref sip,0,ref di)){
         var vf=(VerifyFn)Marshal.GetDelegateForFunctionPointer(di.pfVerify,typeof(VerifyFn));
-        hFileS=CreateFile(path,GR,FSR,IntPtr.Zero,OE,0,IntPtr.Zero); CryptAcquireContext(ref hProv,null,null,24,0xF0000000);
-        pg=Marshal.AllocHGlobal(16); Marshal.StructureToPtr(sip,pg,false);
-        sdig=Marshal.StringToHGlobalAnsi(algoOid);
-        var s=new SUBJ(); s.cbSize=(uint)Marshal.SizeOf(typeof(SUBJ)); s.pgType=pg; s.hFile=hFileS; s.file=path; s.enc=0x10001; s.hProv=hProv; s.dig.oid=sdig;
-        contentOk = vf(ref s,ref ind)==0;
+        hFileS=CreateFile(path,GR,FSR,IntPtr.Zero,OE,0,IntPtr.Zero);
+        bool _provOk=CryptAcquireContext(ref hProv,null,null,24,0xF0000000);
+        // Only a comparison that actually RAN may set digestChecked. Feeding the SIP an
+        // INVALID_HANDLE_VALUE file handle or a null provider yields a nonzero result that is
+        // indistinguishable from a real mismatch, and the caller would report tampering for a
+        // file it could not even open. The sibling CreateFile at VerifyBinary checks the same way.
+        if(hFileS!=IntPtr.Zero && hFileS!=new IntPtr(-1) && _provOk){
+          pg=Marshal.AllocHGlobal(16); Marshal.StructureToPtr(sip,pg,false);
+          sdig=Marshal.StringToHGlobalAnsi(algoOid);
+          var s=new SUBJ(); s.cbSize=(uint)Marshal.SizeOf(typeof(SUBJ)); s.pgType=pg; s.hFile=hFileS; s.file=path; s.enc=0x10001; s.hProv=hProv; s.dig.oid=sdig;
+          contentOk = vf(ref s,ref ind)==0; digestChecked=true;
+        }
       }
     } finally {
       if(ind.dataOid!=IntPtr.Zero)Marshal.FreeHGlobal(ind.dataOid); if(ind.dataVal.p!=IntPtr.Zero)Marshal.FreeHGlobal(ind.dataVal.p); if(ind.algo.oid!=IntPtr.Zero)Marshal.FreeHGlobal(ind.algo.oid); if(ind.digest.p!=IntPtr.Zero)Marshal.FreeHGlobal(ind.digest.p);
@@ -157,7 +194,7 @@ public partial class Validator {
   static void CollectUris(byte[] b, int o, int end, System.Collections.Generic.List<string> outv, int depth){ if(depth>24) return; int p=o; while(p+1<end){ int hl,ln,tag; try{ tag=TLV(b,p,out hl,out ln); }catch{ break; } int cs=p+hl; if(ln<0||cs+ln>end) break; if(tag==0x86){ string u=Encoding.ASCII.GetString(b,cs,ln).Trim(); if(u.Length>0&&!outv.Contains(u))outv.Add(u); } else if((tag&0x20)!=0){ CollectUris(b,cs,cs+ln,outv,depth+1); } p=cs+ln; } }
   static System.Collections.Generic.List<string> CdpUrls(X509Certificate2 c){ var r=new System.Collections.Generic.List<string>(); foreach(var ext in c.Extensions){ if(ext.Oid.Value=="2.5.29.31"){ try{ CollectUris(ext.RawData,0,ext.RawData.Length,r,0); }catch{} } } return r; }
   // AIA = SEQUENCE OF AccessDescription{ accessMethod OID, accessLocation GeneralName }; split caIssuers (..48.2) vs OCSP (..48.1)
-  static void AiaUrls(X509Certificate2 c, System.Collections.Generic.List<string> ca, System.Collections.Generic.List<string> ocsp){ foreach(var ext in c.Extensions){ if(ext.Oid.Value!="1.3.6.1.5.5.7.1.1") continue; try{ byte[] raw=ext.RawData; int hl,ln; if(TLV(raw,0,out hl,out ln)!=0x30) continue; int p=hl,end=hl+ln; while(p+1<end){ int h2,l2; int t2=TLV(raw,p,out h2,out l2); int cs=p+h2; if(l2<0||cs+l2>end) break; if(t2==0x30){ int ip=cs,iend=cs+l2; string method=null,uri=null; while(ip+1<iend){ int h3,l3; int t3=TLV(raw,ip,out h3,out l3); int ccs=ip+h3; if(l3<0||ccs+l3>iend) break; if(t3==0x06) method=Oid(Sub(raw,ccs,l3)); else if(t3==0x86) uri=Encoding.ASCII.GetString(raw,ccs,l3).Trim(); ip=ccs+l3; } if(uri!=null&&uri.Length>0){ if(method=="1.3.6.1.5.5.7.48.2"){ if(!ca.Contains(uri))ca.Add(uri); } else if(method=="1.3.6.1.5.5.7.48.1"){ if(!ocsp.Contains(uri))ocsp.Add(uri); } } } p=cs+l2; } }catch{} } }
+  static void AiaUrls(X509Certificate2 c, System.Collections.Generic.List<string> ca, System.Collections.Generic.List<string> ocsp){ foreach(var ext in c.Extensions){ if(ext.Oid.Value!="1.3.6.1.5.5.7.1.1") continue; try{ byte[] raw=ext.RawData; int hl,ln; if(TLV(raw,0,out hl,out ln)!=0x30) continue; int p=hl,end=hl+ln; while(p+1<end){ int h2,l2; int t2=TLV(raw,p,out h2,out l2); int cs=p+h2; if(l2<0||cs+l2>end) break; if(t2==0x30){ int ip=cs,iend=cs+l2; string method=null,uri=null; while(ip+1<iend){ int h3,l3; int t3=TLV(raw,ip,out h3,out l3); int ccs=ip+h3; if(l3<0||ccs+l3>iend) break; if(t3==0x06){ try{ method=Oid(Sub(raw,ccs,l3)); }catch{ method=null; } } else if(t3==0x86) uri=Encoding.ASCII.GetString(raw,ccs,l3).Trim(); ip=ccs+l3; } if(uri!=null&&uri.Length>0){ if(method=="1.3.6.1.5.5.7.48.2"){ if(!ca.Contains(uri))ca.Add(uri); } else if(method=="1.3.6.1.5.5.7.48.1"){ if(!ocsp.Contains(uri))ocsp.Add(uri); } } } p=cs+l2; } }catch{} } }
   static bool SelfIssued(X509Certificate2 c){ byte[] su=c.SubjectName.RawData, iss=c.IssuerName.RawData; if(su.Length!=iss.Length) return false; for(int k=0;k<su.Length;k++) if(su[k]!=iss[k]) return false; return true; }
   // Cache root-store thumbprints: the live lookup loaded the entire root store (~300 certs) for every
   // cert during JSON serialization. Built lazily, rebuilt on RefreshTrust (which can add WU roots).
@@ -202,8 +239,8 @@ public partial class Validator {
   static string[] PsStatus(string path){ try{
     var psi=new System.Diagnostics.ProcessStartInfo(Sys("WindowsPowerShell\\v1.0\\powershell.exe"),"-NoProfile -ExecutionPolicy Bypass -Command \"$s=Get-AuthenticodeSignature -LiteralPath $env:VAL_PATH; $c=$s.SignerCertificate; [Console]::Out.Write($s.Status.ToString()+'|'+$(if($c){$c.Thumbprint}else{''}))\"");
     psi.UseShellExecute=false; psi.RedirectStandardOutput=true; psi.CreateNoWindow=true; psi.EnvironmentVariables["VAL_PATH"]=path;
-    using(var p=System.Diagnostics.Process.Start(psi)){ var ot=p.StandardOutput.ReadToEndAsync(); if(!p.WaitForExit(15000)){ try{p.Kill();}catch{} return new[]{"UnknownError",""}; } string o=""; try{ o=ot.Result; }catch{} return o.Split('|'); }
-  }catch{ return new[]{"UnknownError",""}; } }
+    using(var p=System.Diagnostics.Process.Start(psi)){ var ot=p.StandardOutput.ReadToEndAsync(); if(!p.WaitForExit(15000)){ try{p.Kill();}catch{} return new[]{"__noanswer__",""}; } string o=""; try{ o=ot.Result; }catch{} if(string.IsNullOrWhiteSpace(o)) return new[]{"__noanswer__",""}; return o.Split('|'); }
+  }catch{ return new[]{"__noanswer__",""}; } }
   static string MapPs(string s){ switch(s){ case "Valid":return "Valid"; case "HashMismatch":return "HashMismatch"; case "NotSigned":return "NotSigned"; case "NotTrusted":return "UntrustedRoot"; case "UnknownError":return "UnknownError"; default:return s; } }
 
 
@@ -235,7 +272,8 @@ public partial class Validator {
   static string WarmCache(string dir){ int n=0,certs=0; var files=Directory.Exists(dir)?Directory.GetFiles(dir):new string[]{dir};
     foreach(var f in files){ try{ X509Certificate2 signer; string st; X509Certificate2 tsa; DateTime? stm; VerifyBinary(f,out signer,out st,out tsa,out stm);
       if(signer==null){ byte[] der=ScriptPkcs7(f); if(der!=null){ try{ var cms=new SignedCms(); cms.Decode(der); signer=cms.SignerInfos[0].Certificate; }catch{} } }
-      if(signer!=null){ var ch=new X509Chain(); ch.ChainPolicy.RevocationMode=X509RevocationMode.Online; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.Build(signer); foreach(var el in ch.ChainElements){ HarvestCDP(el.Certificate); certs++; } ch.Dispose(); n++; }
+      if(signer!=null){ using(var ch=new X509Chain()){ ch.ChainPolicy.RevocationMode=X509RevocationMode.Online; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.Build(signer); foreach(var el in ch.ChainElements){ HarvestCDP(el.Certificate); certs++; } } n++; }
+      if(signer!=null) signer.Dispose(); if(tsa!=null) tsa.Dispose();   // this loop walks a whole directory; both are re-assigned next iteration
     }catch{} }
     var b=new StringBuilder("{\"warmed_files\":"+n+",\"chain_certs\":"+certs+",\"crl_ocsp_urls_cached\":["); bool fst=true; foreach(var u in harvestedCDP){ if(!fst)b.Append(","); b.Append(J(u)); fst=false; } return b.Append("]}").ToString();
   }
@@ -323,21 +361,70 @@ public partial class Validator {
     var sw=Stopwatch.StartNew();
     embeddedCerts=null;
       string sha=null; try{ sha=Sha(path); }catch{}
+      X509Certificate2 signer=null, tsa=null; X509Chain ch=null;   // declared out of the try so the finally can dispose them on ANY path
       try{
-      X509Certificate2 signer=null, tsa=null; DateTime? signTime=null; string sigType="None"; string status; string psThumb=null; string diag=null; bool stVerified=false;
+      DateTime? signTime=null; string sigType="None"; string status; string psThumb=null; string diag=null; bool stVerified=false;
       int res=VerifyBinary(path,out signer,out sigType,out tsa,out signTime);
       if(signer!=null) embeddedCerts=PeEmbeddedCerts(path);
       bool contentOk=true;
+        // Script paths: PowerShell reports HashMismatch when the digest fails, so any other ANSWER
+        // means it did not find a mismatch. psAns separates a real answer from PsStatus's non-answers
+        // (15s timeout/Kill, exception, empty stdout), which must never read as verified.
+        // Known limit, deliberately accepted: PowerShell's SignatureStatus has no Expired or Revoked
+        // member, so those collapse into UnknownError alongside genuine "could not process" cases.
+        // Treating UnknownError as unverified would flip every expired-signer script to false -- the
+        // regression fixed on the binary side -- so it stays true here. The two branches therefore do
+        // NOT agree on UnknownError and cannot until the status carries the wintrust code.
       if((uint)res==0x800B0100){ byte[] der=ScriptPkcs7(path);
-        if(der!=null){ bool sigOk=VerifyScript(path,der,out signer,out contentOk,out tsa,out signTime); sigType="Script";
-          if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); contentOk=(status!="HashMismatch"); if(status=="NotSigned"){ signer=null; tsa=null; sigType="None"; } }
-          else { if(!sigOk||!contentOk) status="HashMismatch"; else status="__chain__"; } }
-        else { if(scriptMode=="ps"){ var pr=PsStatus(path); status=MapPs(pr[0]); if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else status="NotSigned"; }
-      } else { status=MapBin(res); if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
+        // VerifyScript reassigns signer/tsa and the embeddedCerts static. The catalog fallback can
+        // reach here with all three already populated (anyCat sets signer before returning catRes,
+        // which may itself be TRUST_E_NOSIGNATURE), so release them before they are overwritten.
+        if(der!=null){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _pc in embeddedCerts) _pc.Dispose(); embeddedCerts=null; }
+          bool digestChecked; bool sigOk=VerifyScript(path,der,out signer,out contentOk,out tsa,out signTime,out digestChecked); sigType="Script";
+          if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status=="NotSigned"){ if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); signer=null; tsa=null; sigType="None"; } }
+          // "we could not parse SpcIndirectData" is NOT "the digest did not match" -- reporting
+          // HashMismatch there would assert tampering the tool never tested for.
+          else if(!digestChecked){ status="UnknownError"; diag="script content check did not run (unparseable SpcIndirectData, no SIP for this subject type, or the file/provider could not be opened); cms_signature="+(sigOk?"valid":"INVALID"); }
+          // A broken CMS signature means the digest we compared against is not authentically
+          // bound to this file, so content_verified cannot stand either -- otherwise this emits
+          // status=HashMismatch beside content_verified=true, exactly the contradiction the
+          // binary branch was fixed to stop producing.
+          // Two disjoint causes reach HashMismatch here and, now that contentOk is forced false,
+          // nothing else in the JSON tells them apart -- the binary path always attaches a
+          // wintrust code, this branch attached nothing. Name which one fired.
+          else { if(!sigOk||!contentOk){ status="HashMismatch"; diag=!sigOk?(contentOk?"cms signature invalid; content digest matched":"cms signature invalid; content digest mismatched"):"content digest mismatched; cms signature valid"; contentOk=false; } else status="__chain__"; } }
+        else { if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else { status="NotSigned"; contentOk=false; } }
+      } else { status=MapBin(res);
+        // content_verified answers "was the signed digest checked against the bytes on disk, and did
+        // it match" -- not "is this trusted". WinVerifyTrust checked the digest on every outcome here
+        // except a mismatch (checked, failed) and an unrecognised error (we cannot claim to know), so
+        // those are the only false cases: Revoked/UntrustedRoot are trust failures over a GOOD digest.
+        // Without this the initial `true` above survived, so a tampered signed binary reported
+        // status=HashMismatch alongside content_verified=true.
+        // Gate on the wintrust CODE, not MapBin's string: MapBin names only four codes and collapses
+        // everything else into "UnknownError", including the cert-policy failures where WinVerifyTrust
+        // DID check the digest and it DID match (it runs the SIP/digest step before the policy step).
+        // Deriving from the string reported content_verified:false for every expired-cert binary.
+        // WinVerifyTrust runs the SIP/digest step BEFORE certificate policy, so reaching ANY code in
+        // the CERT_E_* policy range means the digest was compared and matched. Enumerating a subset
+        // left neighbours like CERT_E_UNTRUSTEDCA/UNTRUSTEDTESTROOT/VALIDITYPERIODNESTING reporting
+        // false for intact files. Excluded: 0x800B0100 TRUST_E_NOSIGNATURE (handled above, nothing to
+        // compare) and 0x80096010 TRUST_E_BAD_DIGEST (compared, did not match).
+        // Also post-digest, but in the TRUST_E_* 0x80096xxx family rather than the CERT_E_* range:
+        // 0x80096003 COUNTER_SIGNER and 0x80096005 TIME_STAMP are countersignature/timestamp failures,
+        // and 0x80096019 BASIC_CONSTRAINTS is a certificate policy failure -- in all three the primary
+        // object digest was already compared and matched. Deliberately NOT included: 0x80096010
+        // BAD_DIGEST (compared, failed), 0x80096002 NO_SIGNER_CERT and 0x80096004 CERT_SIGNATURE,
+        // where we cannot claim the file digest was reached.
+        // 0x800B010B TRUST_E_FAIL is inside the numeric range but is NOT a certificate-policy
+        // outcome -- it is wintrust's generic failure, carrying no evidence the digest step ran.
+        { uint _u=(uint)res; contentOk = (res==0) || (_u>=0x800B0101 && _u<=0x800B0114 && _u!=0x800B010B)
+                                       || _u==0x80096003 || _u==0x80096005 || _u==0x80096019; }
+        if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
       var b=new StringBuilder(); b.Append("{\"file_sha256\":").Append(J(sha));
       string chainJson="null";
       if(signer!=null){
-        var ch=new X509Chain(); ch.ChainPolicy.RevocationMode=(rev=="offline"?X509RevocationMode.Offline:rev=="none"?X509RevocationMode.NoCheck:X509RevocationMode.Online); ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); if(embeddedCerts!=null) ch.ChainPolicy.ExtraStore.AddRange(embeddedCerts);
+        ch=new X509Chain(); ch.ChainPolicy.RevocationMode=(rev=="offline"?X509RevocationMode.Offline:rev=="none"?X509RevocationMode.NoCheck:X509RevocationMode.Online); ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); if(embeddedCerts!=null) ch.ChainPolicy.ExtraStore.AddRange(embeddedCerts);
         stVerified = (sigType=="Script") ? TsaTrusted(tsa, embeddedCerts) : (tsa!=null); try{ ch.ChainPolicy.VerificationTime = (signTime.HasValue && (sigType!="Script" || stVerified)) ? signTime.Value : (tsa!=null ? signer.NotBefore.AddMinutes(1) : DateTime.Now); }catch{}
         bool ok=ch.Build(signer); bool revoked=false,untrusted=false,nottime=false,revunk=false,distrusted=false;
         foreach(var s2 in ch.ChainStatus){ var f=s2.Status; if(f==X509ChainStatusFlags.Revoked)revoked=true; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)untrusted=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)nottime=true; if((f&(X509ChainStatusFlags.RevocationStatusUnknown|X509ChainStatusFlags.OfflineRevocation))!=0)revunk=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)distrusted=true; }
@@ -346,15 +433,15 @@ public partial class Validator {
         if(revoked && status!="HashMismatch" && status!="NotSigned") status="Revoked";
         if(distrusted && status!="HashMismatch" && status!="NotSigned") status="Distrusted";
         var celems=new System.Collections.Generic.List<string>(); foreach(var el in ch.ChainElements) celems.Add(CertJson(el.Certificate));
-        chainJson="{\"chain_builds\":"+(ok?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revunk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"valid_at_sign_time\":"+(!untrusted&&!revoked&&!nottime&&!distrusted?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",celems)+"]}"; ch.Dispose();
+        chainJson="{\"chain_builds\":"+(ok?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revunk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"valid_at_sign_time\":"+(!untrusted&&!revoked&&!nottime&&!distrusted?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",celems)+"]}";
       }
       if(status=="__chain__") status="UnknownError";
       if(signer==null && status!="Valid") contentOk=false;
       b.Append(",\"status\":").Append(J(status)).Append(",\"signature_type\":").Append(J(sigType)).Append(",\"content_verified\":").Append(contentOk?"true":"false"); if(diag!=null) b.Append(",\"error\":").Append(J(diag));
       b.Append(",\"is_os_binary\":").Append(IsOS(sigType,signer)?"true":"false"); b.Append(",\"signer\":").Append(CertJson(signer)); b.Append(",\"chain\":").Append(chainJson); b.Append(",\"graveyard\":").Append(GraveyardJson(signer!=null?signer.Thumbprint:psThumb, signer!=null?signer.SerialNumber:null, signer!=null?TbsAlg(signer,"SHA256"):null, sha)); b.Append(",\"timestamped\":").Append(tsa!=null?"true":"false"); b.Append(",\"sign_time\":").Append(signTime.HasValue?J(signTime.Value.ToString("o")):"null"); b.Append(",\"sign_time_verified\":").Append((signTime.HasValue&&stVerified)?"true":"false"); b.Append(",\"timestamper\":").Append(CertJson(tsa));
       b.Append(",\"ms\":").Append(sw.ElapsedMilliseconds).Append("}");
-      if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); }   // each embedded/CMS cert wraps an unmanaged handle; dispose promptly (long-running serve mode)
       return b.ToString();
       }catch(OutOfMemoryException){ throw; }catch(Exception _ex){ try{Console.Error.WriteLine(_ex.ToString());}catch{} return ErrJson(sha,"UnknownError",_ex.GetType().Name); }
+      finally{ if(ch!=null)ch.Dispose(); if(signer!=null)signer.Dispose(); if(tsa!=null)tsa.Dispose(); if(embeddedCerts!=null){ foreach(var _ec in embeddedCerts) _ec.Dispose(); } embeddedCerts=null; }   // exception-safe: dispose the certs AND the chain on every path, and drop the static so it never roots disposed handles
   }
 }

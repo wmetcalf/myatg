@@ -23,6 +23,14 @@ public class RdpVal {
     if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\"}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
     string status; X509Certificate2 signer=null; bool sigOk=false; var chainInfo="null";
+    // Same exception-safety contract as myatg.cs ValidateFileLocked: every unmanaged handle opened
+    // here is released on ANY exit path -- including a throw in the JSON assembly below the catch,
+    // which sits outside the inner guard and used to skip disposal entirely.
+    // extra is materialised once and fed to BOTH chains: cms.Certificates is a getter that rebuilds
+    // the whole bag (new X509Certificate2 per cert) on every access, so reading it twice opened a
+    // second full copy for no gain.
+    X509Chain ch=null, ch2=null; X509Certificate2Collection extra=null;
+    try{
     try{
       byte[] blob=Convert.FromBase64String(b64);
       if(blob.Length<12) throw new Exception("rdp sig blob too short");
@@ -41,13 +49,13 @@ public class RdpVal {
       try{ var scms=new SignedCms(new ContentInfo(new Oid("1.2.840.113549.1.7.1"),msgblob),true); scms.Decode(pkcs7); scms.CheckSignature(true); sigOk=true; }catch{ sigOk=false; }
       DateTime? signTime=null;
       try{ foreach(var at in cms.SignerInfos[0].SignedAttributes){ if(at.Oid.Value=="1.2.840.113549.1.9.5"&&at.Values.Count>0){ var t=new Pkcs9SigningTime(at.Values[0].RawData); signTime=t.SigningTime.ToUniversalTime(); } } }catch{}
-      var ch=new X509Chain(); ch.ChainPolicy.RevocationMode=rm; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); ch.ChainPolicy.ExtraStore.AddRange(cms.Certificates);
+      ch=new X509Chain(); ch.ChainPolicy.RevocationMode=rm; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); extra=cms.Certificates; ch.ChainPolicy.ExtraStore.AddRange(extra);
       bool built=ch.Build(signer); bool untrusted=false,revoked=false,notTime=false,revUnk=false,distrusted=false;
       foreach(var st in ch.ChainStatus){ var f=st.Status; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)untrusted=true; if(f==X509ChainStatusFlags.Revoked)revoked=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)notTime=true; if((f&(X509ChainStatusFlags.RevocationStatusUnknown|X509ChainStatusFlags.OfflineRevocation))!=0)revUnk=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)distrusted=true; }
       DateTime now=DateTime.UtcNow; bool expired=now>signer.NotAfter.ToUniversalTime(); bool notYet=now<signer.NotBefore.ToUniversalTime();
-      bool validAtSign=false; if(signTime.HasValue){ var ch2=new X509Chain(); ch2.ChainPolicy.RevocationMode=rm; ch2.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch2.ChainPolicy.VerificationTime=signTime.Value; ch2.ChainPolicy.ExtraStore.AddRange(cms.Certificates); ch2.Build(signer); bool u2=false,r2=false,t2=false,d2=false; foreach(var st in ch2.ChainStatus){ var f=st.Status; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)u2=true; if(f==X509ChainStatusFlags.Revoked)r2=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)t2=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)d2=true; } validAtSign=!u2&&!r2&&!t2&&!d2; ch2.Dispose(); }
+      bool validAtSign=false; if(signTime.HasValue){ ch2=new X509Chain(); ch2.ChainPolicy.RevocationMode=rm; ch2.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch2.ChainPolicy.VerificationTime=signTime.Value; ch2.ChainPolicy.ExtraStore.AddRange(extra); ch2.Build(signer); bool u2=false,r2=false,t2=false,d2=false; foreach(var st in ch2.ChainStatus){ var f=st.Status; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)u2=true; if(f==X509ChainStatusFlags.Revoked)r2=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)t2=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)d2=true; } validAtSign=!u2&&!r2&&!t2&&!d2; }
       var elems=new List<string>(); foreach(var el in ch.ChainElements){ elems.Add(Validator.CertJson(el.Certificate)); }
-      chainInfo="{\"signature_valid\":"+(sigOk?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revUnk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"not_before\":"+J(signer.NotBefore.ToUniversalTime().ToString("o"))+",\"not_after\":"+J(signer.NotAfter.ToUniversalTime().ToString("o"))+",\"expired_now\":"+(expired?"true":"false")+",\"not_yet_valid\":"+(notYet?"true":"false")+",\"valid_now\":"+((built&&!revoked&&!notTime&&!untrusted&&!distrusted)?"true":"false")+",\"sign_time\":"+(signTime.HasValue?J(signTime.Value.ToString("o")):"null")+",\"sign_time_verified\":false,\"valid_at_sign_time\":"+(validAtSign?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",elems)+"]}"; ch.Dispose();
+      chainInfo="{\"signature_valid\":"+(sigOk?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revUnk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"not_before\":"+J(signer.NotBefore.ToUniversalTime().ToString("o"))+",\"not_after\":"+J(signer.NotAfter.ToUniversalTime().ToString("o"))+",\"expired_now\":"+(expired?"true":"false")+",\"not_yet_valid\":"+(notYet?"true":"false")+",\"valid_now\":"+((built&&!revoked&&!notTime&&!untrusted&&!distrusted)?"true":"false")+",\"sign_time\":"+(signTime.HasValue?J(signTime.Value.ToString("o")):"null")+",\"sign_time_verified\":false,\"valid_at_sign_time\":"+(validAtSign?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",elems)+"]}";
       status = !sigOk?"HashMismatch":(distrusted?"Distrusted":(revoked?"Revoked":(expired?"Expired":(notYet?"NotYetValid":(untrusted?"UntrustedRoot":((built&&!notTime&&Validator.EkuOkForCodeSign(signer))?"Valid":"UnknownError"))))));
     }catch(Exception e){ status="UnknownError"; try{Console.Error.WriteLine(e.ToString());}catch{} sb.Append(",\"error\":"+J(e.GetType().Name)); }
     sb.Append(",\"status\":"+J(status)+",\"signature_type\":\"RDP\"");
@@ -72,7 +80,13 @@ public class RdpVal {
     sb.Append(",\"signscope_count\":"+signedScope.Count(x=>x.Length>0)+",\"total_settings\":"+fileKeys.Count+",\"unsigned_settings\":"+unsignedCount);
     sb.Append(",\"unsigned_dangerous\":["+string.Join(",",unsignedDanger.Select(J))+"]");
     sb.Append(",\"duplicate_settings\":["+string.Join(",",dupKeys.Select(J))+"]");
-    if(signer!=null) signer.Dispose();   // SignerInfos[0].Certificate is a fresh X509Certificate2 wrapping an unmanaged handle; dispose it (mirrors myatg.cs) to avoid handle leaks in --serve
     return sb.Append("}").ToString();
+    } finally {
+      // SignerInfos[0].Certificate and every ExtraStore bag entry wrap an unmanaged handle, and each
+      // chain holds a CERT_CHAIN_CONTEXT. Chains go first so nothing is disposed out from under them.
+      if(ch!=null) ch.Dispose(); if(ch2!=null) ch2.Dispose();
+      if(extra!=null){ foreach(X509Certificate2 _c in extra) _c.Dispose(); }
+      if(signer!=null) signer.Dispose();
+    }
   }
 }

@@ -17,6 +17,65 @@ jobs:
           set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
           "%CSC%" /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:myatg.exe myatg.cs rdp_validate.cs http_serve.cs service.cs
 
+      - name: Unit — DER OID decoder vectors (X.690 8.19)
+        shell: cmd
+        run: |
+          set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
+          "%CSC%" /nologo /out:oid_vectors.exe tests\oid_vectors.cs
+          oid_vectors.exe
+          if errorlevel 1 ( echo OID vector test failed & exit /b 1 )
+
+      - name: Smoke — content_verified tracks the digest, not the initial value
+        shell: pwsh
+        run: |
+          # Must exercise the EMBEDDED branch (MapBin), which is where content_verified was the
+          # constant true. A .ps1 can take the script branch instead, so this signs a real PE and
+          # asserts signature_type to prove which branch ran.
+          $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-cv -CertStoreLocation Cert:\CurrentUser\My
+          Copy-Item .\myatg.exe .\signed.exe -Force
+          $null = Set-AuthenticodeSignature -FilePath signed.exe -Certificate $c
+          Copy-Item .\signed.exe .\tampered.exe -Force
+          $fs=[IO.File]::Open("$PWD\tampered.exe","Open","ReadWrite")
+          $fs.Seek(0x200,"Begin") | Out-Null; $b=$fs.ReadByte()
+          $fs.Seek(0x200,"Begin") | Out-Null; $fs.WriteByte(($b -bxor 0xFF)); $fs.Close()
+          $g = .\myatg.exe --rev none signed.exe   | ConvertFrom-Json
+          $b = .\myatg.exe --rev none tampered.exe | ConvertFrom-Json
+          Write-Host "intact  : type=$($g.signature_type) status=$($g.status) content_verified=$($g.content_verified)"
+          Write-Host "tampered: type=$($b.signature_type) status=$($b.status) content_verified=$($b.content_verified)"
+          # both must be Embedded, else this step is not testing the branch it claims to
+          if ($g.signature_type -ne "Embedded") { Write-Error "intact took the $($g.signature_type) path, not Embedded"; exit 1 }
+          if ($b.signature_type -ne "Embedded") { Write-Error "tampered took the $($b.signature_type) path, not Embedded"; exit 1 }
+          # tampered: digest genuinely failed -> false
+          if ($b.status -ne "HashMismatch") { Write-Error "expected HashMismatch, got $($b.status)"; exit 1 }
+          if ($b.content_verified -ne $false) { Write-Error "tampered reported content_verified=$($b.content_verified)"; exit 1 }
+          # intact but untrusted signer -> digest DID match, must stay true (guards over-correction)
+          if ($g.status -ne "UntrustedRoot") { Write-Error "expected UntrustedRoot, got $($g.status)"; exit 1 }
+          if ($g.content_verified -ne $true) { Write-Error "intact reported content_verified=$($g.content_verified)"; exit 1 }
+
+          # THE discriminating vector. UntrustedRoot+HashMismatch evaluate the same under the old
+          # MapBin-string form and the new wintrust-code switch, so they cannot catch a revert. An
+          # intact binary with an EXPIRED signer is the case that differs: string form -> UnknownError
+          # -> false; code form -> 0x800B0101 -> true. Short-lived cert, sign while valid, then wait.
+          # The cert must be TRUSTED, else wintrust returns CERT_E_UNTRUSTEDROOT (0x800B0109) and never
+          # reaches CERT_E_EXPIRED (0x800B0101) -- and UntrustedRoot is true under BOTH the old string
+          # form and the new code switch, so it discriminates nothing.
+          $se = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-cv-exp -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddSeconds(30)
+          foreach ($sn in 'Root','TrustedPublisher') {
+            $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($sn,'LocalMachine')
+            $st.Open('ReadWrite'); $st.Add($se); $st.Close()
+          }
+          Copy-Item .\myatg.exe .\expired.exe -Force
+          $null = Set-AuthenticodeSignature -FilePath expired.exe -Certificate $se
+          if ((Get-AuthenticodeSignature expired.exe).Status -eq "NotSigned") { Write-Error "fixture never got signed"; exit 1 }
+          Start-Sleep -Seconds 40
+          $e = .\myatg.exe --rev none expired.exe | ConvertFrom-Json
+          Write-Host "expired : type=$($e.signature_type) status=$($e.status) content_verified=$($e.content_verified) err=$($e.error)"
+          if ($e.signature_type -ne "Embedded") { Write-Error "expired fixture took the $($e.signature_type) path"; exit 1 }
+          # Self-validating: if this is not the expired code, the vector is not discriminating and the
+          # step must fail rather than pass for the wrong reason.
+          if ($e.error -notlike "*800B0101*") { Write-Error "expected wintrust=0x800B0101 (CERT_E_EXPIRED), got status=$($e.status) error=$($e.error) - vector is not exercising the fix"; exit 1 }
+          if ($e.content_verified -ne $true) { Write-Error "intact expired-cert binary reported content_verified=$($e.content_verified) - the digest matched"; exit 1 }
+
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
         run: |
