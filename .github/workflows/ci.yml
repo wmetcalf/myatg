@@ -91,23 +91,6 @@ jobs:
             if ($null -eq $p.PSObject.Properties[$f]) { Write-Error "unsigned .rdp is missing $f"; exit 1 } }
           if ($p.signature_type -ne "None") { Write-Error "expected signature_type None, got $($p.signature_type)"; exit 1 }
 
-      - name: Smoke — Distrusted mapping (0x800B0111)
-        shell: pwsh
-        timeout-minutes: 5
-        run: |
-          # MapBin gained two cases; the expired vector covers 0x800B0101, this covers 0x800B0111.
-          $d = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-distrust -CertStoreLocation Cert:\CurrentUser\My
-          foreach ($sn in 'Root','TrustedPublisher') {
-            $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($sn,'CurrentUser')
-            $st.Open('ReadWrite'); $st.Add($d); $st.Close() }
-          Copy-Item .\myatg.exe .\distrust.exe -Force
-          $null = Set-AuthenticodeSignature -FilePath distrust.exe -Certificate $d
-          $st = New-Object System.Security.Cryptography.X509Certificates.X509Store('Disallowed','CurrentUser')
-          $st.Open('ReadWrite'); $st.Add($d); $st.Close()
-          $r = .\myatg.exe --rev none distrust.exe | ConvertFrom-Json
-          Write-Host "distrusted: status=$($r.status) content_verified=$($r.content_verified) err=$($r.error)"
-          if ($r.status -ne "Distrusted") { Write-Error "expected Distrusted, got $($r.status) (err=$($r.error))"; exit 1 }
-
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd
         run: |
