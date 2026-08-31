@@ -38,7 +38,7 @@ public class RdpVal {
     // known-bad files this field exists to surface, which is the omission this change fixes.
     if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+",\"is_os_binary\":false,\"timestamped\":false,\"sign_time\":null,\"timestamper\":null,\"ms\":"+_sw.ElapsedMilliseconds+"}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
-    bool sawSignTime=false; DateTime? sigTimeTop=null;
+    DateTime? sigTimeTop=null;
     string status; X509Certificate2 signer=null; bool sigOk=false; bool contentSigOk=false; var chainInfo="null";
     // Same exception-safety contract as myatg.cs ValidateFileLocked: every unmanaged handle opened
     // here is released on ANY exit path -- including a throw in the JSON assembly below the catch,
@@ -71,8 +71,8 @@ public class RdpVal {
       try{ var scms=new SignedCms(new ContentInfo(new Oid("1.2.840.113549.1.7.1"),msgblob),true); scms.Decode(pkcs7);
            try{ scms.SignerInfos[0].CheckSignature(true); contentSigOk=true; }catch{ contentSigOk=false; }
            scms.CheckSignature(true); sigOk=true; }catch{ sigOk=false; }
-      DateTime? signTime=null;   // sawSignTime is set below when the signing-time attribute parses
-      try{ foreach(var at in cms.SignerInfos[0].SignedAttributes){ if(at.Oid.Value=="1.2.840.113549.1.9.5"&&at.Values.Count>0){ var t=new Pkcs9SigningTime(at.Values[0].RawData); signTime=t.SigningTime.ToUniversalTime(); sawSignTime=true; sigTimeTop=signTime; } } }catch{}
+      DateTime? signTime=null;   // sigTimeTop is set below when the signingTime attribute parses
+      try{ foreach(var at in cms.SignerInfos[0].SignedAttributes){ if(at.Oid.Value=="1.2.840.113549.1.9.5"&&at.Values.Count>0){ var t=new Pkcs9SigningTime(at.Values[0].RawData); signTime=t.SigningTime.ToUniversalTime(); sigTimeTop=signTime; } } }catch{}
       ch=new X509Chain(); ch.ChainPolicy.RevocationMode=rm; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); extra=cms.Certificates; ch.ChainPolicy.ExtraStore.AddRange(extra);
       bool built=ch.Build(signer); bool untrusted=false,revoked=false,notTime=false,revUnk=false,distrusted=false;
       foreach(var st in ch.ChainStatus){ var f=st.Status; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)untrusted=true; if(f==X509ChainStatusFlags.Revoked)revoked=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)notTime=true; if((f&(X509ChainStatusFlags.RevocationStatusUnknown|X509ChainStatusFlags.OfflineRevocation))!=0)revUnk=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)distrusted=true; }
@@ -124,7 +124,11 @@ public class RdpVal {
     // documented field set parity: RDP is never an OS binary, and its timestamp fact lives in
     // the signing-time attribute rather than an RFC3161 countersigner cert.
     sb.Append(",\"is_os_binary\":false");
-    sb.Append(",\"timestamped\":"+(sawSignTime?"true":"false")+",\"sign_time\":"+(sigTimeTop.HasValue?J(sigTimeTop.Value.ToString("o")):"null")+",\"timestamper\":null");
+    // timestamped means "a timestamp authority or countersignature was VERIFIED", which is what it
+    // means on every other path. This validator checks no countersignature at all: sign_time comes
+    // from the PKCS#9 signingTime SIGNED attribute, which is a signer-controlled claim and no
+    // independent evidence. Reporting it as timestamped would let a forged claim read as TSA-backed.
+    sb.Append(",\"timestamped\":false,\"sign_time\":"+(sigTimeTop.HasValue?J(sigTimeTop.Value.ToString("o")):"null")+",\"timestamper\":null");
     sb.Append(",\"ms\":"+_sw.ElapsedMilliseconds);
     sb.Append(",\"signscope_count\":"+signedScope.Count(x=>x.Length>0)+",\"total_settings\":"+fileKeys.Count+",\"unsigned_settings\":"+unsignedCount);
     sb.Append(",\"unsigned_dangerous\":["+string.Join(",",unsignedDanger.Select(J))+"]");

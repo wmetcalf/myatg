@@ -395,6 +395,11 @@ public partial class Validator {
           else { if(!sigOk||!contentOk){ status="HashMismatch"; diag=!sigOk?(contentOk?"cms signature invalid; content digest matched":"cms signature invalid; content digest mismatched"):"content digest mismatched; cms signature valid"; contentOk=false; } else status="__chain__"; } }
         else { if(scriptMode=="ps"){ var pr=PsStatus(path); bool psAns=pr[0]!="__noanswer__"; status=psAns?MapPs(pr[0]):"UnknownError"; contentOk=psAns&&status!="HashMismatch"&&status!="NotSigned"; if(status!="NotSigned"&&pr.Length>1&&pr[1].Length>0) psThumb=pr[1]; } else { status="NotSigned"; contentOk=false; } }
       } else { status=MapBin(res);
+        // CERT_E_EXPIRED (0x800B0101) means the certificate is outside its validity period in
+        // EITHER direction -- wintrust returns it for a future-dated NotBefore as well. Mapping it
+        // unconditionally to "Expired" mislabels that case, and the vocabulary already carries
+        // NotYetValid (rdp_validate distinguishes the two). Use the recovered signer's dates.
+        if(status=="Expired" && signer!=null){ try{ if(DateTime.UtcNow < signer.NotBefore.ToUniversalTime()) status="NotYetValid"; }catch{} }
         // content_verified answers "was the signed digest checked against the bytes on disk, and did
         // it match" -- not "is this trusted". WinVerifyTrust checked the digest on every outcome here
         // except a mismatch (checked, failed) and an unrecognised error (we cannot claim to know), so
