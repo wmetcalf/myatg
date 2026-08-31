@@ -133,11 +133,18 @@ public partial class Validator {
     // Stream line-by-line instead of buffering the whole file into a List<string>: a large script
     // (maxBytes is up to 500 MB) would otherwise materialize millions of string objects at once.
     // Same scan, O(signature-block) memory.
-    string pfx=null; var sb=new StringBuilder(); bool inb=false;
+    var sb=new StringBuilder(); bool inb=false;
     try{ using(var sr=new StreamReader(path,Encoding.GetEncoding(28591),true)){ string raw; while((raw=sr.ReadLine())!=null){ string t=raw.Trim();
-      int bi=t.IndexOf("Begin signature block"); if(bi>0){ pfx=t.Substring(0,bi).Trim(); inb=true; continue; }
-      if(t.Contains("End signature block")){ inb=false; continue; }
-      if(inb && pfx!=null && t.StartsWith(pfx)) sb.Append(t.Substring(pfx.Length).Trim()); } } }catch{ return null; }
+      if(t.IndexOf("Begin signature block",StringComparison.OrdinalIgnoreCase)>=0){ inb=true; continue; }
+      if(t.IndexOf("End signature block",StringComparison.OrdinalIgnoreCase)>=0){ inb=false; continue; }
+      if(!inb) continue;
+      // The framing differs from the marker: PowerShell writes "# SIG # Begin signature block" but
+      // prefixes the base64 body with a bare "# ". Deriving the prefix from the marker (the old
+      // behaviour) therefore matched NOTHING on a genuinely signed .ps1 and the scrape returned null.
+      // Every line between the markers is signature data, so strip the comment framing instead.
+      string v=t.TrimStart('#').Trim();
+      if(v.StartsWith("SIG #",StringComparison.OrdinalIgnoreCase)) v=v.Substring(5).Trim();
+      if(v.Length>0) sb.Append(v); } } }catch{ return null; }
     if(sb.Length==0) return null;
     try{ return Convert.FromBase64String(sb.ToString()); }catch{ return null; }
   }
@@ -175,7 +182,13 @@ public partial class Validator {
           pg=Marshal.AllocHGlobal(16); Marshal.StructureToPtr(sip,pg,false);
           sdig=Marshal.StringToHGlobalAnsi(algoOid);
           var s=new SUBJ(); s.cbSize=(uint)Marshal.SizeOf(typeof(SUBJ)); s.pgType=pg; s.hFile=hFileS; s.file=path; s.enc=0x10001; s.hProv=hProv; s.dig.oid=sdig;
-          contentOk = vf(ref s,ref ind)==0; digestChecked=true;
+          // pfVerify is CryptSIPVerifyIndirectData, which returns a Win32 BOOL: NONZERO on success.
+        // This was `==0`, which inverted every native-mode content verdict. MEASURED on Windows
+        // Server 2025 with the PowerShell SIP, calling pfVerify directly with a real SpcIndirectData:
+        //   correct digest   -> returned 1, GetLastError 0
+        //   corrupted digest -> returned 0, GetLastError 0x80096010 (TRUST_E_BAD_DIGEST)
+        // so `==0` reported an intact file as unverified and a TAMPERED file as content-verified.
+        contentOk = vf(ref s,ref ind)!=0; digestChecked=true;
         }
       }
     } finally {
