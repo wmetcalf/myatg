@@ -184,8 +184,10 @@ Always emits the same field set (error/oversize cases too, with null/empty value
 `file_sha256, status, signature_type, content_verified, is_os_binary, signer, chain,
 graveyard, timestamped, sign_time, timestamper, ms`.
 
-`status` ∈ `Valid, NotSigned, HashMismatch, Revoked, Distrusted, UntrustedRoot, Expired
-(RDP), UnknownError`.
+`status` ∈ `Valid, NotSigned, HashMismatch, Revoked, Distrusted, UntrustedRoot, Expired,
+UnknownError`. `Expired` means the signature is intact but its signing certificate is
+outside its validity window and nothing timestamped it; `content_verified` stays `true`
+for these, because the digest was compared and matched before the policy check failed.
 
 `chain.chain[]` is the full leaf→intermediate→root list. Each cert (and `signer`) carries:
 `subject(+_cn), issuer(+_cn), serial_number, thumbprint, md5/sha1/sha256_fingerprint,

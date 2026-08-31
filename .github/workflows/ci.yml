@@ -73,7 +73,10 @@ jobs:
           if ($e.signature_type -ne "Embedded") { Write-Error "expired fixture took the $($e.signature_type) path"; exit 1 }
           # Self-validating: if this is not the expired code, the vector is not discriminating and the
           # step must fail rather than pass for the wrong reason.
-          if ($e.error -notlike "*800B0101*") { Write-Error "expected wintrust=0x800B0101 (CERT_E_EXPIRED), got status=$($e.status) error=$($e.error) - vector is not exercising the fix"; exit 1 }
+          # Only 0x800B0101 maps to Expired, so asserting the status proves the vector reached
+          # the intended code AND pins the #7 fix; the raw code stays in `error` as a cross-check.
+          if ($e.status -ne "Expired") { Write-Error "expected status=Expired, got $($e.status) (error=$($e.error)) - vector is not exercising CERT_E_EXPIRED"; exit 1 }
+          if ($e.error -notlike "*800B0101*") { Write-Error "expected wintrust=0x800B0101 in error, got $($e.error)"; exit 1 }
           if ($e.content_verified -ne $true) { Write-Error "intact expired-cert binary reported content_verified=$($e.content_verified) - the digest matched"; exit 1 }
 
       - name: Smoke — validate a real OS binary, expect JSON + exit 0

@@ -296,7 +296,7 @@ public partial class Validator {
       byte[] pkcs7=new byte[blobLen]; int got=0; while(got<blobLen){ int r=fs.Read(pkcs7,got,blobLen-got); if(r<=0) break; got+=r; } if(got<blobLen) return null;
       var cms=new SignedCms(); cms.Decode(pkcs7); return cms.Certificates;
     } }catch{ return null; } }
-  static string MapBin(int r){ uint u=(uint)r; if(r==0)return "Valid"; switch(u){ case 0x800B0100:return "NotSigned"; case 0x80096010:return "HashMismatch"; case 0x800B010C:return "Revoked"; case 0x800B0109:return "UntrustedRoot"; default:return "UnknownError"; } }
+  static string MapBin(int r){ uint u=(uint)r; if(r==0)return "Valid"; switch(u){ case 0x800B0100:return "NotSigned"; case 0x80096010:return "HashMismatch"; case 0x800B010C:return "Revoked"; case 0x800B0109:return "UntrustedRoot"; case 0x800B0101:return "Expired"; case 0x800B0111:return "Distrusted"; default:return "UnknownError"; } }
   static string ErrJson(string fileSha, string status, string error){ return "{\"file_sha256\":"+J(fileSha)+",\"status\":"+J(status)+",\"error\":"+J(error)+",\"signature_type\":\"None\",\"content_verified\":false,\"is_os_binary\":false,\"signer\":null,\"chain\":null,\"graveyard\":{\"hit\":false},\"timestamped\":false,\"sign_time\":null,\"sign_time_verified\":false,\"timestamper\":null,\"ms\":0}"; }
 
   public static void Main(string[] a){
@@ -420,7 +420,7 @@ public partial class Validator {
         // outcome -- it is wintrust's generic failure, carrying no evidence the digest step ran.
         { uint _u=(uint)res; contentOk = (res==0) || (_u>=0x800B0101 && _u<=0x800B0114 && _u!=0x800B010B)
                                        || _u==0x80096003 || _u==0x80096005 || _u==0x80096019; }
-        if(status=="UnknownError"||status=="HashMismatch") diag="wintrust=0x"+((uint)res).ToString("X8"); }
+        if(status=="UnknownError"||status=="HashMismatch"||status=="Expired"||status=="Distrusted") diag="wintrust=0x"+((uint)res).ToString("X8"); }
       var b=new StringBuilder(); b.Append("{\"file_sha256\":").Append(J(sha));
       string chainJson="null";
       if(signer!=null){
