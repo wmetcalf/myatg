@@ -21,7 +21,10 @@ public class RdpVal {
     var scopeM=Regex.Match(text, @"signscope:s:([^\r\n]*)", RegexOptions.IgnoreCase);
     string fsha=null; try{ fsha=Validator.Sha(path); }catch{}
     var sb=new StringBuilder("{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(fsha));
-    if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"graveyard\":{\"hit\":false}}").ToString(); }
+    // GraveyardJson matches on file_sha256 alone, so an UNSIGNED .rdp whose hash is in the CSV
+    // must still be looked up -- hard-coding hit:false here would silently drop exactly the
+    // known-bad files this field exists to surface, which is the omission this change fixes.
+    if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+"}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
     string status; X509Certificate2 signer=null; bool sigOk=false; var chainInfo="null";
     // Same exception-safety contract as myatg.cs ValidateFileLocked: every unmanaged handle opened
