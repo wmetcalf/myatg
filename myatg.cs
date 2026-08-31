@@ -208,7 +208,7 @@ public partial class Validator {
   }
   static bool IsTrustedRoot(X509Certificate2 c){ if(c==null||c.Thumbprint==null) return false; return RootThumbs().Contains(c.Thumbprint); }
   static string UrlArr(System.Collections.Generic.List<string> l){ var b=new StringBuilder("["); for(int i=0;i<l.Count;i++){ if(i>0)b.Append(","); b.Append(J(l[i])); } return b.Append("]").ToString(); }
-  static string TbsAlg(X509Certificate2 c, string alg){ byte[] raw=c.RawData; int p=1; int l=raw[p++]; if(l>=0x80){int n=l&0x7F;l=0;for(int i=0;i<n;i++)l=(l<<8)|raw[p++];} int s=p; int q=s+1; int tl=raw[q++]; if(tl>=0x80){int n=tl&0x7F;tl=0;for(int i=0;i<n;i++)tl=(tl<<8)|raw[q++];} int tot=(q-s)+tl; byte[] t=new byte[tot]; Array.Copy(raw,s,t,0,tot); using(var h=HashAlgorithm.Create(alg)) return BitConverter.ToString(h.ComputeHash(t)).Replace("-","").ToLower(); }
+  public static string TbsAlg(X509Certificate2 c, string alg){ byte[] raw=c.RawData; int p=1; int l=raw[p++]; if(l>=0x80){int n=l&0x7F;l=0;for(int i=0;i<n;i++)l=(l<<8)|raw[p++];} int s=p; int q=s+1; int tl=raw[q++]; if(tl>=0x80){int n=tl&0x7F;tl=0;for(int i=0;i<n;i++)tl=(tl<<8)|raw[q++];} int tot=(q-s)+tl; byte[] t=new byte[tot]; Array.Copy(raw,s,t,0,tot); using(var h=HashAlgorithm.Create(alg)) return BitConverter.ToString(h.ComputeHash(t)).Replace("-","").ToLower(); }
   public static string CertJson(X509Certificate2 c){ if(c==null) return "null"; var eku=new System.Collections.Generic.List<string>(); bool cs=false; foreach(var e in c.Extensions){ var k=e as X509EnhancedKeyUsageExtension; if(k!=null){ foreach(var o in k.EnhancedKeyUsages){ eku.Add(o.Value); if(o.Value=="1.3.6.1.5.5.7.3.3") cs=true; } } }
     var sb=new StringBuilder("{"); sb.Append("\"subject\":").Append(J(c.Subject)).Append(",\"subject_cn\":").Append(J(CN(c,false))).Append(",\"issuer\":").Append(J(c.Issuer)).Append(",\"issuer_cn\":").Append(J(CN(c,true)));
     sb.Append(",\"serial_number\":").Append(J(c.SerialNumber)).Append(",\"thumbprint\":").Append(J(c.Thumbprint)).Append(",\"md5_fingerprint\":").Append(J(Md5Cert(c))).Append(",\"sha1_fingerprint\":").Append(J(c.Thumbprint.ToLower())).Append(",\"sha256_fingerprint\":").Append(J(Sha256Cert(c)));
@@ -226,7 +226,7 @@ public partial class Validator {
     for(int li=1;li<lines.Length;li++){ var f=SplitCsv(lines[li]); string[] rec={ iMal>=0&&iMal<f.Length?f[iMal]:"", iTyp>=0&&iTyp<f.Length?f[iTyp]:"" };
       if(iTbs>=0&&iTbs<f.Length&&f[iTbs].Length>0) gvTbs[f[iTbs].ToLower()]=rec; if(iThumb>=0&&iThumb<f.Length&&f[iThumb].Length>0) gvThumb[f[iThumb].Replace(" ","").ToUpper()]=rec; if(iSer>=0&&iSer<f.Length&&f[iSer].Length>0) gvSerial[f[iSer].Replace(" ","").ToUpper()]=rec; if(iHash>=0&&iHash<f.Length&&f[iHash].Length>0) gvHash[f[iHash].ToLower()]=rec; } }
   static string[] SplitCsv(string line){ var o=new System.Collections.Generic.List<string>(); var cur=new StringBuilder(); bool q=false; foreach(char c in line){ if(c=='"') q=!q; else if(c==','&&!q){ o.Add(cur.ToString()); cur.Clear(); } else cur.Append(c); } o.Add(cur.ToString()); return o.ToArray(); }
-  static string GraveyardJson(string thumb, string serial, string tbs, string fileSha){ if(gvTbs==null) return "{\"hit\":false}"; string[] r=null; string on=null;
+  public static string GraveyardJson(string thumb, string serial, string tbs, string fileSha){ if(gvTbs==null) return "{\"hit\":false}"; string[] r=null; string on=null;
     if(tbs!=null&&gvTbs.TryGetValue(tbs.ToLower(),out r)) on="cert_tbs_sha256"; else if(thumb!=null&&gvThumb.TryGetValue(thumb.Replace(" ","").ToUpper(),out r)) on="cert_thumbprint"; else if(serial!=null&&gvSerial.TryGetValue(serial.Replace(" ","").ToUpper(),out r)) on="cert_serial"; else if(fileSha!=null&&gvHash.TryGetValue(fileSha.ToLower(),out r)) on="file_sha256";
     if(r==null) return "{\"hit\":false}"; return "{\"hit\":true,\"matched_on\":"+J(on)+",\"malware\":"+J(r[0])+",\"malware_type\":"+J(r[1])+"}"; }
 
@@ -279,7 +279,7 @@ public partial class Validator {
   }
 
   static string J(string s){ if(s==null)return "null"; var b=new StringBuilder("\""); foreach(char ch in s){ if(ch=='\\')b.Append("\\\\"); else if(ch=='"')b.Append("\\\""); else if(ch<0x20||ch>0x7E)b.Append("\\u").Append(((int)ch).ToString("x4")); else b.Append(ch); } b.Append("\""); return b.ToString(); }
-  static string Sha(string path){ using(var s=File.OpenRead(path)) using(var h=SHA256.Create()) return BitConverter.ToString(h.ComputeHash(s)).Replace("-","").ToLower(); }
+  public static string Sha(string path){ using(var s=File.OpenRead(path)) using(var h=SHA256.Create()) return BitConverter.ToString(h.ComputeHash(s)).Replace("-","").ToLower(); }
   // Parse the PE security directory's WIN_CERTIFICATE PKCS#7 and return its embedded certs (for ExtraStore); null if none/not a PE
   static X509Certificate2Collection PeEmbeddedCerts(string path){ try{
     using(var fs=File.OpenRead(path)){

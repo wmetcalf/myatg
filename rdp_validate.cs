@@ -15,12 +15,13 @@ public class RdpVal {
     // Format-specific cap well below the generic maxBytes: real .rdp files are a few KB, so an
     // 8 MB ceiling blocks a hostile multi-hundred-MB "RDP" from amplifying memory (whole-file read +
     // base64 signature decode + pkcs7 buffer) and OOM-crashing the persistent service.
-    try{ if(new FileInfo(path).Length > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"signer\":null,\"chain\":null}"; }catch{}
+    try{ if(new FileInfo(path).Length > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":null,\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":{\"hit\":false}}"; }catch{}
     string text=File.ReadAllText(path); // auto-detects UTF-16 BOM
     var sigM=Regex.Match(text, @"signature:s:([^\r\n]*)", RegexOptions.IgnoreCase);
     var scopeM=Regex.Match(text, @"signscope:s:([^\r\n]*)", RegexOptions.IgnoreCase);
-    var sb=new StringBuilder("{\"file\":"+J(Path.GetFileName(path)));
-    if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\"}").ToString(); }
+    string fsha=null; try{ fsha=Validator.Sha(path); }catch{}
+    var sb=new StringBuilder("{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(fsha));
+    if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"graveyard\":{\"hit\":false}}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
     string status; X509Certificate2 signer=null; bool sigOk=false; var chainInfo="null";
     // Same exception-safety contract as myatg.cs ValidateFileLocked: every unmanaged handle opened
@@ -59,6 +60,12 @@ public class RdpVal {
       status = !sigOk?"HashMismatch":(distrusted?"Distrusted":(revoked?"Revoked":(expired?"Expired":(notYet?"NotYetValid":(untrusted?"UntrustedRoot":((built&&!notTime&&Validator.EkuOkForCodeSign(signer))?"Valid":"UnknownError"))))));
     }catch(Exception e){ status="UnknownError"; try{Console.Error.WriteLine(e.ToString());}catch{} sb.Append(",\"error\":"+J(e.GetType().Name)); }
     sb.Append(",\"status\":"+J(status)+",\"signature_type\":\"RDP\"");
+    // content_verified has the same meaning as on the other paths -- "the signed digest was
+    // compared against the content and matched" -- but for RDP the signed content is the
+    // reconstructed canonical settings text named by signscope, NOT the raw file bytes.
+    // sigOk is exactly that comparison (a detached CheckSignature over the rebuilt message).
+    sb.Append(",\"content_verified\":"+(sigOk?"true":"false"));
+    sb.Append(",\"graveyard\":"+Validator.GraveyardJson(signer!=null?signer.Thumbprint:null, signer!=null?signer.SerialNumber:null, signer!=null?Validator.TbsAlg(signer,"SHA256"):null, fsha));
     if(signer!=null) sb.Append(",\"signer\":"+Validator.CertJson(signer));
     sb.Append(",\"chain\":"+chainInfo);
     // signscope coverage: settings present in file but NOT signed
