@@ -11,6 +11,7 @@ public class RdpVal {
   static readonly string[] DANGEROUS = { "drivestoredirect","redirectclipboard","redirectprinters","redirectcomports","redirectsmartcards","redirectdrives","redirectposdevices","remoteapplicationprogram","remoteapplicationcmdline","alternate shell","shell working directory","kdcproxyname","gatewayhostname","gatewaycredssource","gatewayprofileusagemethod","promptcredentialonce","enablecredsspsupport","authentication level","prompt for credentials","use redirection server name" };
   static string J(string s){ if(s==null)return "null"; var b=new StringBuilder("\""); foreach(char c in s){ if(c=='\\')b.Append("\\\\"); else if(c=='"')b.Append("\\\""); else if(c<0x20||c>0x7E)b.Append("\\u").Append(((int)c).ToString("x4")); else b.Append(c);} b.Append("\""); return b.ToString(); }
   public static string Validate(string path, string rev){
+    var _sw=System.Diagnostics.Stopwatch.StartNew();   // declared first: the early exits below emit "ms"
     X509RevocationMode rm = rev=="offline"?X509RevocationMode.Offline : rev=="none"?X509RevocationMode.NoCheck : X509RevocationMode.Online;
     // Format-specific cap well below the generic maxBytes: real .rdp files are a few KB, so an
     // 8 MB ceiling blocks a hostile multi-hundred-MB "RDP" from amplifying memory (whole-file read +
@@ -37,7 +38,7 @@ public class RdpVal {
     // known-bad files this field exists to surface, which is the omission this change fixes.
     if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+",\"is_os_binary\":false,\"timestamped\":false,\"timestamper\":null,\"ms\":"+_sw.ElapsedMilliseconds+"}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
-    var _sw=System.Diagnostics.Stopwatch.StartNew(); bool sawSignTime=false;
+    bool sawSignTime=false;
     string status; X509Certificate2 signer=null; bool sigOk=false; bool contentSigOk=false; var chainInfo="null";
     // Same exception-safety contract as myatg.cs ValidateFileLocked: every unmanaged handle opened
     // here is released on ANY exit path -- including a throw in the JSON assembly below the catch,
