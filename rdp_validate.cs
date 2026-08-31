@@ -18,9 +18,16 @@ public class RdpVal {
     // Hash before the size guard: Validator.Sha streams, so it is memory-bounded and the guard's
     // amplification rationale never covered it. Without this an oversized known-bad sample reports
     // graveyard.hit:false purely because we declined to hash it.
-    string oshaEarly=null; try{ oshaEarly=Validator.Sha(path); }catch{}
+    // Oversized files are hashed by streaming (memory-bounded) purely so the graveyard lookup
+    // below can still run; everything under the guard is read ONCE into rawBytes and both the
+    // hash and the parsed text are derived from that single buffer, so file_sha256 and the
+    // signature analysis always describe the same snapshot.
+    string oshaEarly=null;
+    try{ if(new FileInfo(path).Length > 8L*1024*1024) oshaEarly=Validator.Sha(path); }catch{}
     try{ if(new FileInfo(path).Length > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(oshaEarly)+",\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,oshaEarly)+"}"; }catch{}
-    string text=File.ReadAllText(path); // auto-detects UTF-16 BOM
+    byte[] rawBytes=File.ReadAllBytes(path);
+    string text; using(var _ms=new MemoryStream(rawBytes)) using(var _sr=new StreamReader(_ms,Encoding.UTF8,true)) text=_sr.ReadToEnd();  // same BOM auto-detection as ReadAllText
+    using(var _h=System.Security.Cryptography.SHA256.Create()) oshaEarly=BitConverter.ToString(_h.ComputeHash(rawBytes)).Replace("-","").ToLowerInvariant();
     var sigM=Regex.Match(text, @"signature:s:([^\r\n]*)", RegexOptions.IgnoreCase);
     var scopeM=Regex.Match(text, @"signscope:s:([^\r\n]*)", RegexOptions.IgnoreCase);
     string fsha=oshaEarly;
@@ -30,7 +37,7 @@ public class RdpVal {
     // known-bad files this field exists to surface, which is the omission this change fixes.
     if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+"}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
-    string status; X509Certificate2 signer=null; bool sigOk=false; var chainInfo="null";
+    string status; X509Certificate2 signer=null; bool sigOk=false; bool contentSigOk=false; var chainInfo="null";
     // Same exception-safety contract as myatg.cs ValidateFileLocked: every unmanaged handle opened
     // here is released on ANY exit path -- including a throw in the JSON assembly below the catch,
     // which sits outside the inner guard and used to skip disposal entirely.
@@ -54,7 +61,14 @@ public class RdpVal {
       var signlines=new List<string>(); foreach(var nm in signnames){ if(bykey.ContainsKey(nm.ToLower())) signlines.Add(bykey[nm.ToLower()]); }
       string msgtext=string.Join("\r\n",signlines)+"\r\n"+"signscope:s:"+string.Join(",",signnames)+"\r\n"+"\u0000";
       byte[] msgblob=Encoding.Unicode.GetBytes(msgtext);
-      try{ var scms=new SignedCms(new ContentInfo(new Oid("1.2.840.113549.1.7.1"),msgblob),true); scms.Decode(pkcs7); scms.CheckSignature(true); sigOk=true; }catch{ sigOk=false; }
+      // Two distinct facts. CheckSignature(true) skips CHAIN validation but still verifies every
+      // signer INCLUDING countersigners, so a corrupt timestamp countersignature would otherwise be
+      // reported as a content digest failure -- the same conflation fixed on the PE side for
+      // TRUST_E_TIME_STAMP. contentSigOk is the primary signer's signature over the reconstructed
+      // content and is what content_verified reports; sigOk stays the whole-message result.
+      try{ var scms=new SignedCms(new ContentInfo(new Oid("1.2.840.113549.1.7.1"),msgblob),true); scms.Decode(pkcs7);
+           try{ scms.SignerInfos[0].CheckSignature(true); contentSigOk=true; }catch{ contentSigOk=false; }
+           scms.CheckSignature(true); sigOk=true; }catch{ sigOk=false; }
       DateTime? signTime=null;
       try{ foreach(var at in cms.SignerInfos[0].SignedAttributes){ if(at.Oid.Value=="1.2.840.113549.1.9.5"&&at.Values.Count>0){ var t=new Pkcs9SigningTime(at.Values[0].RawData); signTime=t.SigningTime.ToUniversalTime(); } } }catch{}
       ch=new X509Chain(); ch.ChainPolicy.RevocationMode=rm; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); extra=cms.Certificates; ch.ChainPolicy.ExtraStore.AddRange(extra);
@@ -87,7 +101,7 @@ public class RdpVal {
     // signature valid while changing what actually executes. Reporting true there would tell a
     // consumer the effective content matches what was signed when it demonstrably does not.
     bool shadowedSigned = dupKeys.Any(k => signedScope.Contains(k));
-    bool contentEffective = sigOk && !shadowedSigned;
+    bool contentEffective = contentSigOk && !shadowedSigned;
     sb.Append(",\"status\":"+J(status)+",\"signature_type\":\"RDP\"");
     // Same question as the other paths -- does the content match what was signed -- over a
     // different subject: for RDP the signed content is the canonical settings text named by
