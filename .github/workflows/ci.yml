@@ -87,9 +87,16 @@ jobs:
           Set-Content plain.rdp -Value "full address:s:host.example" -Encoding UTF8
           $p = .\myatg.exe --rev none plain.rdp | ConvertFrom-Json
           Write-Host "rdp: status=$($p.status) type=$($p.signature_type) cv=$($p.content_verified) sha=$($p.file_sha256)"
-          foreach ($f in 'file_sha256','signature_type','content_verified','graveyard','signer','chain') {
+          foreach ($f in 'file_sha256','signature_type','content_verified','graveyard','signer','chain','is_os_binary','timestamped','timestamper','ms') {
             if ($null -eq $p.PSObject.Properties[$f]) { Write-Error "unsigned .rdp is missing $f"; exit 1 } }
           if ($p.signature_type -ne "None") { Write-Error "expected signature_type None, got $($p.signature_type)"; exit 1 }
+          # DISCRIMINATION: ErrJson (returned when RdpVal.Validate throws) emits every key above with
+          # signature_type "None" too, so key-presence alone passes even with the RDP path completely
+          # dead. These three only hold if RdpVal actually ran and produced the unsigned verdict.
+          if ($p.status -ne "NotSigned") { Write-Error "expected status NotSigned, got $($p.status) - RdpVal may not have run"; exit 1 }
+          if ($p.PSObject.Properties['error']) { Write-Error "unexpected error field: $($p.error) - this is the ErrJson fallback, not the RDP path"; exit 1 }
+          $expect = (Get-FileHash plain.rdp -Algorithm SHA256).Hash.ToLower()
+          if ($p.file_sha256 -ne $expect) { Write-Error "file_sha256 $($p.file_sha256) != actual $expect"; exit 1 }
 
       - name: Smoke — validate a real OS binary, expect JSON + exit 0
         shell: cmd

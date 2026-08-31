@@ -401,7 +401,7 @@ public partial class Validator {
         // those are the only false cases: Revoked/UntrustedRoot are trust failures over a GOOD digest.
         // Without this the initial `true` above survived, so a tampered signed binary reported
         // status=HashMismatch alongside content_verified=true.
-        // Gate on the wintrust CODE, not MapBin's string: MapBin names only four codes and collapses
+        // Gate on the wintrust CODE, not MapBin's string: MapBin names only a handful of codes and collapses
         // everything else into "UnknownError", including the cert-policy failures where WinVerifyTrust
         // DID check the digest and it DID match (it runs the SIP/digest step before the policy step).
         // Deriving from the string reported content_verified:false for every expired-cert binary.

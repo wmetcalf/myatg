@@ -22,9 +22,9 @@ public class RdpVal {
     // below can still run; everything under the guard is read ONCE into rawBytes and both the
     // hash and the parsed text are derived from that single buffer, so file_sha256 and the
     // signature analysis always describe the same snapshot.
-    string oshaEarly=null;
-    try{ if(new FileInfo(path).Length > 8L*1024*1024) oshaEarly=Validator.Sha(path); }catch{}
-    try{ if(new FileInfo(path).Length > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(oshaEarly)+",\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,oshaEarly)+"}"; }catch{}
+    string oshaEarly=null; long _len=-1; try{ _len=new FileInfo(path).Length; }catch{}
+    if(_len > 8L*1024*1024){ try{ oshaEarly=Validator.Sha(path); }catch{} }
+    if(_len > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(oshaEarly)+",\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,oshaEarly)+"}";
     byte[] rawBytes=File.ReadAllBytes(path);
     string text; using(var _ms=new MemoryStream(rawBytes)) using(var _sr=new StreamReader(_ms,Encoding.UTF8,true)) text=_sr.ReadToEnd();  // same BOM auto-detection as ReadAllText
     using(var _h=System.Security.Cryptography.SHA256.Create()) oshaEarly=BitConverter.ToString(_h.ComputeHash(rawBytes)).Replace("-","").ToLowerInvariant();
@@ -37,6 +37,7 @@ public class RdpVal {
     // known-bad files this field exists to surface, which is the omission this change fixes.
     if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+"}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
+    var _sw=System.Diagnostics.Stopwatch.StartNew(); bool sawSignTime=false;
     string status; X509Certificate2 signer=null; bool sigOk=false; bool contentSigOk=false; var chainInfo="null";
     // Same exception-safety contract as myatg.cs ValidateFileLocked: every unmanaged handle opened
     // here is released on ANY exit path -- including a throw in the JSON assembly below the catch,
@@ -69,8 +70,8 @@ public class RdpVal {
       try{ var scms=new SignedCms(new ContentInfo(new Oid("1.2.840.113549.1.7.1"),msgblob),true); scms.Decode(pkcs7);
            try{ scms.SignerInfos[0].CheckSignature(true); contentSigOk=true; }catch{ contentSigOk=false; }
            scms.CheckSignature(true); sigOk=true; }catch{ sigOk=false; }
-      DateTime? signTime=null;
-      try{ foreach(var at in cms.SignerInfos[0].SignedAttributes){ if(at.Oid.Value=="1.2.840.113549.1.9.5"&&at.Values.Count>0){ var t=new Pkcs9SigningTime(at.Values[0].RawData); signTime=t.SigningTime.ToUniversalTime(); } } }catch{}
+      DateTime? signTime=null;   // sawSignTime is set below when the signing-time attribute parses
+      try{ foreach(var at in cms.SignerInfos[0].SignedAttributes){ if(at.Oid.Value=="1.2.840.113549.1.9.5"&&at.Values.Count>0){ var t=new Pkcs9SigningTime(at.Values[0].RawData); signTime=t.SigningTime.ToUniversalTime(); sawSignTime=true; } } }catch{}
       ch=new X509Chain(); ch.ChainPolicy.RevocationMode=rm; ch.ChainPolicy.RevocationFlag=X509RevocationFlag.EntireChain; ch.ChainPolicy.UrlRetrievalTimeout=TimeSpan.FromSeconds(15); extra=cms.Certificates; ch.ChainPolicy.ExtraStore.AddRange(extra);
       bool built=ch.Build(signer); bool untrusted=false,revoked=false,notTime=false,revUnk=false,distrusted=false;
       foreach(var st in ch.ChainStatus){ var f=st.Status; if((f&(X509ChainStatusFlags.UntrustedRoot|X509ChainStatusFlags.PartialChain))!=0)untrusted=true; if(f==X509ChainStatusFlags.Revoked)revoked=true; if((f&X509ChainStatusFlags.NotTimeValid)!=0)notTime=true; if((f&(X509ChainStatusFlags.RevocationStatusUnknown|X509ChainStatusFlags.OfflineRevocation))!=0)revUnk=true; if((f&X509ChainStatusFlags.ExplicitDistrust)!=0)distrusted=true; }
@@ -83,7 +84,11 @@ public class RdpVal {
       // content_verified is derived separately, produced status=HashMismatch beside
       // content_verified=true. Key it off the content signature; the whole-message result is
       // still reported as chain.signature_valid.
-      status = !contentSigOk?"HashMismatch":(distrusted?"Distrusted":(revoked?"Revoked":(expired?"Expired":(notYet?"NotYetValid":(untrusted?"UntrustedRoot":((built&&!notTime&&Validator.EkuOkForCodeSign(signer))?"Valid":"UnknownError"))))));
+      // contentSigOk decides HashMismatch (a countersignature failure is not content tampering)
+      // but "Valid" additionally requires sigOk: without that, a message whose first signer
+      // verifies while the message as a whole does not would report Valid beside
+      // chain.signature_valid=false -- fail-open, and worse than the misreport it replaced.
+      status = !contentSigOk?"HashMismatch":(distrusted?"Distrusted":(revoked?"Revoked":(expired?"Expired":(notYet?"NotYetValid":(untrusted?"UntrustedRoot":((built&&!notTime&&sigOk&&Validator.EkuOkForCodeSign(signer))?"Valid":"UnknownError"))))));
     }catch(Exception e){ status="UnknownError"; try{Console.Error.WriteLine(e.ToString());}catch{} sb.Append(",\"error\":"+J(e.GetType().Name)); }
     // signscope coverage: settings present in file but NOT signed
     var signedScope=new HashSet<string>((scopeM.Success?scopeM.Groups[1].Value:"").Split(',').Select(x=>x.Trim().ToLower()));
@@ -113,8 +118,13 @@ public class RdpVal {
     // signscope, not the raw file bytes. sigOk alone is not enough; see shadowedSigned above.
     sb.Append(",\"content_verified\":"+(contentEffective?"true":"false"));
     sb.Append(",\"graveyard\":"+Validator.GraveyardJson(signer!=null?signer.Thumbprint:null, signer!=null?signer.SerialNumber:null, signer!=null?Validator.TbsAlg(signer,"SHA256"):null, fsha));
-    if(signer!=null) sb.Append(",\"signer\":"+Validator.CertJson(signer));
+    sb.Append(",\"signer\":"+(signer!=null?Validator.CertJson(signer):"null"));
     sb.Append(",\"chain\":"+chainInfo);
+    // documented field set parity: RDP is never an OS binary, and its timestamp fact lives in
+    // the signing-time attribute rather than an RFC3161 countersigner cert.
+    sb.Append(",\"is_os_binary\":false");
+    sb.Append(",\"timestamped\":"+(sawSignTime?"true":"false")+",\"timestamper\":null");
+    sb.Append(",\"ms\":"+_sw.ElapsedMilliseconds);
     sb.Append(",\"signscope_count\":"+signedScope.Count(x=>x.Length>0)+",\"total_settings\":"+fileKeys.Count+",\"unsigned_settings\":"+unsignedCount);
     sb.Append(",\"unsigned_dangerous\":["+string.Join(",",unsignedDanger.Select(J))+"]");
     sb.Append(",\"duplicate_settings\":["+string.Join(",",dupKeys.Select(J))+"]");
