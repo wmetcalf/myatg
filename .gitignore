@@ -11,3 +11,6 @@ obj/
 # myatg runtime side-effects
 *.jsonl
 myatg-build.log
+
+# marla review-tool artifact
+.marla-mechanical.json

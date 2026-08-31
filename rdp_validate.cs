@@ -15,16 +15,20 @@ public class RdpVal {
     // Format-specific cap well below the generic maxBytes: real .rdp files are a few KB, so an
     // 8 MB ceiling blocks a hostile multi-hundred-MB "RDP" from amplifying memory (whole-file read +
     // base64 signature decode + pkcs7 buffer) and OOM-crashing the persistent service.
-    try{ if(new FileInfo(path).Length > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":null,\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":{\"hit\":false}}"; }catch{}
+    // Hash before the size guard: Validator.Sha streams, so it is memory-bounded and the guard's
+    // amplification rationale never covered it. Without this an oversized known-bad sample reports
+    // graveyard.hit:false purely because we declined to hash it.
+    string oshaEarly=null; try{ oshaEarly=Validator.Sha(path); }catch{}
+    try{ if(new FileInfo(path).Length > 8L*1024*1024) return "{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(oshaEarly)+",\"status\":\"UnknownError\",\"signature_type\":\"RDP\",\"error\":\"rdp file too large\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,oshaEarly)+"}"; }catch{}
     string text=File.ReadAllText(path); // auto-detects UTF-16 BOM
     var sigM=Regex.Match(text, @"signature:s:([^\r\n]*)", RegexOptions.IgnoreCase);
     var scopeM=Regex.Match(text, @"signscope:s:([^\r\n]*)", RegexOptions.IgnoreCase);
-    string fsha=null; try{ fsha=Validator.Sha(path); }catch{}
+    string fsha=oshaEarly;
     var sb=new StringBuilder("{\"file\":"+J(Path.GetFileName(path))+",\"file_sha256\":"+J(fsha));
     // GraveyardJson matches on file_sha256 alone, so an UNSIGNED .rdp whose hash is in the CSV
     // must still be looked up -- hard-coding hit:false here would silently drop exactly the
     // known-bad files this field exists to surface, which is the omission this change fixes.
-    if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+"}").ToString(); }
+    if(!sigM.Success){ return sb.Append(",\"status\":\"NotSigned\",\"signature_type\":\"None\",\"content_verified\":false,\"signer\":null,\"chain\":null,\"graveyard\":"+Validator.GraveyardJson(null,null,null,fsha)+"}").ToString(); }
     string b64=Regex.Replace(sigM.Groups[1].Value,@"\s","");
     string status; X509Certificate2 signer=null; bool sigOk=false; var chainInfo="null";
     // Same exception-safety contract as myatg.cs ValidateFileLocked: every unmanaged handle opened
@@ -62,15 +66,6 @@ public class RdpVal {
       chainInfo="{\"signature_valid\":"+(sigOk?"true":"false")+",\"chains_to_trusted_root\":"+(!untrusted?"true":"false")+",\"revoked\":"+(revoked?"true":"false")+",\"explicit_distrust\":"+(distrusted?"true":"false")+",\"revocation_checked\":"+(rev=="none"?"\"none\"":((revoked||!revUnk)?(rev=="offline"?"\"offline\"":"\"online\""):"\"unknown\""))+",\"not_before\":"+J(signer.NotBefore.ToUniversalTime().ToString("o"))+",\"not_after\":"+J(signer.NotAfter.ToUniversalTime().ToString("o"))+",\"expired_now\":"+(expired?"true":"false")+",\"not_yet_valid\":"+(notYet?"true":"false")+",\"valid_now\":"+((built&&!revoked&&!notTime&&!untrusted&&!distrusted)?"true":"false")+",\"sign_time\":"+(signTime.HasValue?J(signTime.Value.ToString("o")):"null")+",\"sign_time_verified\":false,\"valid_at_sign_time\":"+(validAtSign?"true":"false")+",\"chain_length\":"+ch.ChainElements.Count+",\"chain\":["+string.Join(",",elems)+"]}";
       status = !sigOk?"HashMismatch":(distrusted?"Distrusted":(revoked?"Revoked":(expired?"Expired":(notYet?"NotYetValid":(untrusted?"UntrustedRoot":((built&&!notTime&&Validator.EkuOkForCodeSign(signer))?"Valid":"UnknownError"))))));
     }catch(Exception e){ status="UnknownError"; try{Console.Error.WriteLine(e.ToString());}catch{} sb.Append(",\"error\":"+J(e.GetType().Name)); }
-    sb.Append(",\"status\":"+J(status)+",\"signature_type\":\"RDP\"");
-    // content_verified has the same meaning as on the other paths -- "the signed digest was
-    // compared against the content and matched" -- but for RDP the signed content is the
-    // reconstructed canonical settings text named by signscope, NOT the raw file bytes.
-    // sigOk is exactly that comparison (a detached CheckSignature over the rebuilt message).
-    sb.Append(",\"content_verified\":"+(sigOk?"true":"false"));
-    sb.Append(",\"graveyard\":"+Validator.GraveyardJson(signer!=null?signer.Thumbprint:null, signer!=null?signer.SerialNumber:null, signer!=null?Validator.TbsAlg(signer,"SHA256"):null, fsha));
-    if(signer!=null) sb.Append(",\"signer\":"+Validator.CertJson(signer));
-    sb.Append(",\"chain\":"+chainInfo);
     // signscope coverage: settings present in file but NOT signed
     var signedScope=new HashSet<string>((scopeM.Success?scopeM.Groups[1].Value:"").Split(',').Select(x=>x.Trim().ToLower()));
     // Duplicate keys: signature reconstruction is first-wins, but mstsc.exe parses last-wins, so an
@@ -87,6 +82,20 @@ public class RdpVal {
     // a duplicated dangerous key is unsigned-effective under last-wins even if its first copy was signed
     foreach(var dk in dupKeys){ if(DANGEROUS.Contains(dk) && !unsignedDanger.Contains(dk)) unsignedDanger.Add(dk); }
     int unsignedCount=fileKeys.Count(k=>!signedScope.Contains(k));
+    // For RDP, "content_verified" cannot just be sigOk. Reconstruction is FIRST-wins but mstsc.exe
+    // parses LAST-wins (see the note above), so an appended duplicate of a signed setting keeps the
+    // signature valid while changing what actually executes. Reporting true there would tell a
+    // consumer the effective content matches what was signed when it demonstrably does not.
+    bool shadowedSigned = dupKeys.Any(k => signedScope.Contains(k));
+    bool contentEffective = sigOk && !shadowedSigned;
+    sb.Append(",\"status\":"+J(status)+",\"signature_type\":\"RDP\"");
+    // Same question as the other paths -- does the content match what was signed -- over a
+    // different subject: for RDP the signed content is the canonical settings text named by
+    // signscope, not the raw file bytes. sigOk alone is not enough; see shadowedSigned above.
+    sb.Append(",\"content_verified\":"+(contentEffective?"true":"false"));
+    sb.Append(",\"graveyard\":"+Validator.GraveyardJson(signer!=null?signer.Thumbprint:null, signer!=null?signer.SerialNumber:null, signer!=null?Validator.TbsAlg(signer,"SHA256"):null, fsha));
+    if(signer!=null) sb.Append(",\"signer\":"+Validator.CertJson(signer));
+    sb.Append(",\"chain\":"+chainInfo);
     sb.Append(",\"signscope_count\":"+signedScope.Count(x=>x.Length>0)+",\"total_settings\":"+fileKeys.Count+",\"unsigned_settings\":"+unsignedCount);
     sb.Append(",\"unsigned_dangerous\":["+string.Join(",",unsignedDanger.Select(J))+"]");
     sb.Append(",\"duplicate_settings\":["+string.Join(",",dupKeys.Select(J))+"]");
