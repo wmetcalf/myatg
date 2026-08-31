@@ -17,6 +17,31 @@ jobs:
           set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
           "%CSC%" /nologo /r:System.Security.dll /r:System.ServiceProcess.dll /out:myatg.exe myatg.cs rdp_validate.cs http_serve.cs service.cs
 
+      - name: Unit — script signature-block scrape + SIP verify polarity
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject CN=ci-sip -CertStoreLocation Cert:\CurrentUser\My
+          Set-Content real.ps1 "Write-Host hello" -Encoding UTF8
+          $r = Set-AuthenticodeSignature -FilePath real.ps1 -Certificate $c
+          # decoy: a script that MENTIONS the delimiter in program text must still scrape correctly.
+          # A substring match would open the block here and swallow the rest of the source.
+          Set-Content decoy.ps1 "Write-Host 'Begin signature block'" -Encoding UTF8
+          $r2 = Set-AuthenticodeSignature -FilePath decoy.ps1 -Certificate $c
+          if ($r2.Status -eq "NotSigned") { Write-Error "decoy fixture never got signed"; exit 1 }
+          if ($r.Status -eq "NotSigned") { Write-Error "fixture never got signed"; exit 1 }
+          # PowerShell frames the base64 body with a bare "# ", not the "# SIG #" of the Begin marker.
+          # Deriving the prefix from the marker made ScriptPkcs7 return null for every real signed script.
+          & $csc /nologo /r:System.Security.dll /out:scrape_vectors.exe tests\scrape_vectors.cs
+          .\scrape_vectors.exe real.ps1 decoy.ps1
+          if ($LASTEXITCODE -ne 0) { Write-Error "ScriptPkcs7 cannot scrape a genuine PowerShell signature block"; exit 1 }
+          # pfVerify is CryptSIPVerifyIndirectData: a Win32 BOOL, nonzero on success. myatg relies on that
+          # (contentOk = vf(...)!=0); this pins the assumption so a revert to ==0 fails loudly.
+          & $csc /nologo /r:System.Security.dll /out:sip_polarity.exe tests\sip_polarity.cs
+          .\sip_polarity.exe real.ps1
+          if ($LASTEXITCODE -ne 0) { Write-Error "SIP verify polarity is not what myatg assumes"; exit 1 }
+
       - name: Unit — DER OID decoder vectors (X.690 8.19)
         shell: cmd
         run: |
